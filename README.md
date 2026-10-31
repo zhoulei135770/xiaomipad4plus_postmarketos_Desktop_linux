@@ -98,22 +98,21 @@ sudo reboot
 
 ### 恢复（TWRP / fastboot）
 
-镜像包在 [Releases](../../releases)：
+镜像包在 **[Releases](https://github.com/zhoulei135770/xiaomipad4plus_postmarketos_Desktop_linux/releases)**：
 
 | 文件 | 用途 |
 |---|---|
-| `clover-restore-*.zip` | **TWRP 可直刷**：boot.img + rootfs.tar.gz，恢复成开箱即用状态 |
-| `boot-*.img` | 仅内核，`fastboot flash boot` |
+| `twrp-3.7.0_9-0-clover-mipad4.img` | TWRP 3.7.0 recovery（60 MB，`fastboot boot` 即可临时启动） |
+| `clover-restore-*.zip` | **完整恢复包**：boot.img + rootfs，TWRP 里 Install 直接刷完 |
+| `*.sha256` | 校验文件 |
 
 ```sh
-# 方式 A（推荐）：fastboot 刷内核（64 MB，最稳）
-fastboot flash boot boot.img
-fastboot reboot
+# 推荐顺序：fastboot 刷内核（小、稳）→ TWRP 刷整包
+fastboot flash boot boot.img          # 或从 zip 里取出
+fastboot boot twrp-3.7.0_9-0-clover-mipad4.img
+# TWRP: Install → clover-restore-*.zip → Reboot System
 
-# 方式 B：TWRP 刷整包（rootfs 已改为流式解压，不占内存盘）
-#   fastboot boot twrp-3.7.0_9-0-clover-mipad4.img
-#   Wipe → Format Data（可选）
-#   Install → clover-restore-*.zip
+# 一次性（不想分两步）：TWRP 里刷 zip 也会重刷 boot
 ```
 
 > ⚠️ 镜像约 2.6 GB，**长时间传输容易中断**：

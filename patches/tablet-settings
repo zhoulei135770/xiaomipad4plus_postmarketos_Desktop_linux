@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""tablet-settings - control centre for the Mi Pad 4 Plus.
+
+A touch-friendly panel with the switches a real computer is expected to have:
+
+    * WiFi / Bluetooth on-off
+    * screen brightness and volume
+    * memory and CPU temperature readout, one-tap memory reclaim
+    * links into the stock XFCE settings dialogs
+    * lock / reboot / power off
+
+Everything privileged goes through "sudo -n" against the narrow rule set in
+/etc/sudoers.d/tablet-settings, so the app never asks for a password.
+"""
+import os
+import subprocess
+import glob
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+BACKLIGHT = "/sys/class/backlight/lcd-backlight"
+AUDIO_SINK = "@DEFAULT_AUDIO_SINK@"
+
+CSS = b"""
+window { background: #1e1f22; }
+label, button { color: #e6e6e6; }
+.card { background: #2a2c30; border-radius: 12px; padding: 14px; }
+.title { font-size: 20px; font-weight: bold; }
+.sub   { font-size: 13px; color: #9aa0a6; }
+.value { font-size: 16px; font-weight: bold; }
+switch { min-width: 64px; min-height: 34px; }
+scale trough { min-height: 26px; }
+button.action {
+    min-height: 52px;
+    font-size: 15px;
+    background-image: none;
+    background-color: #34383d;
+    color: #e8eaed;
+    border: 1px solid #4a4f56;
+    border-radius: 9px;
+}
+button.action:hover { background-color: #3f444a; }
+button.action:active { background-color: #2b2f34; }
+"""
+
+
+def run(cmd, root=False):
+    argv = ["sudo", "-n"] + cmd if root else cmd
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def battery():
+    for p in glob.glob("/sys/class/power_supply/*/capacity"):
+        cap = read(p)
+        st = read(os.path.join(os.path.dirname(p), "status"), "")
+        if cap:
+            return int(cap), st
+    return None, ""
+
+
+def meminfo():
+    d = {}
+    for line in (read("/proc/meminfo", "") or "").splitlines():
+        k, _, v = line.partition(":")
+        d[k] = int(v.split()[0]) if v.split() else 0
+    total = d.get("MemTotal", 0) // 1024
+    avail = d.get("MemAvailable", 0) // 1024
+    return total, avail
+
+
+def cpu_temp():
+    best = None
+    for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+        name = read(os.path.join(z, "type"), "")
+        if "cpu" not in name.lower():
+            continue
+        t = read(os.path.join(z, "temp"))
+        if t:
+            t = int(t) // 1000
+            best = t if best is None else max(best, t)
+    return best
+
+
+def wifi_on():
+    r = run(["nmcli", "-t", "-f", "WIFI", "radio"])
+    return r is not None and r.stdout.strip().endswith("enabled")
+
+
+def bt_on():
+    r = run(["rfkill", "list", "bluetooth"])
+    if not r or not r.stdout:
+        return False
+    return "Soft blocked: no" in r.stdout
+
+
+class Card(Gtk.Box):
+    def __init__(self, title):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.get_style_context().add_class("card")
+        lbl = Gtk.Label(label=title, xalign=0)
+        lbl.get_style_context().add_class("sub")
+        self.pack_start(lbl, False, False, 0)
+
+
+class Settings(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="平板设置")
+        self.set_default_size(900, 760)
+        self.set_border_width(14)
+
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.add(outer)
+
+        self.status = Gtk.Label(xalign=0)
+        self.status.get_style_context().add_class("title")
+        outer.pack_start(self.status, False, False, 0)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer.pack_start(sw, True, True, 0)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        sw.add(box)
+
+        # ---- connectivity ----
+        net = Card("连接")
+        box.pack_start(net, False, False, 0)
+        self.sw_wifi = Gtk.Switch()
+        self.sw_wifi.set_active(wifi_on())
+        self.sw_wifi.connect("state-set", self.on_wifi)
+        net.pack_start(self.row("WiFi", "无线局域网", self.sw_wifi), False, False, 0)
+
+        self.sw_bt = Gtk.Switch()
+        self.sw_bt.set_active(bt_on())
+        self.sw_bt.connect("state-set", self.on_bt)
+        net.pack_start(self.row("蓝牙", "蓝牙开关", self.sw_bt), False, False, 0)
+
+        # ---- display / audio ----
+        da = Card("显示与声音")
+        box.pack_start(da, False, False, 0)
+
+        self.br = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 255, 1)
+        cur = int(read(os.path.join(BACKLIGHT, "brightness"), "128"))
+        self.br.set_value(cur)
+        self.br.connect("value-changed", self.on_brightness)
+        da.pack_start(self.slider_row("屏幕亮度", self.br), False, False, 0)
+
+        self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.vol.set_value(60)
+        r = run(["wpctl", "get-volume", AUDIO_SINK])
+        if r and r.returncode == 0:
+            try:
+                self.vol.set_value(int(float(r.stdout.split()[1]) * 100))
+            except (IndexError, ValueError):
+                pass
+        self.vol.connect("value-changed", self.on_volume)
+        da.pack_start(self.slider_row("音量", self.vol), False, False, 0)
+
+        # ---- maintenance ----
+        mnt = Card("维护")
+        box.pack_start(mnt, False, False, 0)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True)
+        mnt.pack_start(grid, False, False, 0)
+        self.add_button(grid, "清理内存", 0, 0, self.on_drop_caches)
+        self.add_button(grid, "显示设置", 1, 0,
+                        lambda *_: run(["xfce4-display-settings"]))
+        self.add_button(grid, "电源管理", 0, 1,
+                        lambda *_: run(["xfce4-power-manager-settings"]))
+        self.add_button(grid, "声音设置", 1, 1, lambda *_: run(["pavucontrol"]))
+        self.add_button(grid, "所有设置", 0, 2,
+                        lambda *_: run(["xfce4-settings-manager"]))
+        self.add_button(grid, "虚拟键盘", 1, 2, lambda *_: run(["onboard"]))
+
+        act = Card("电源")
+        box.pack_start(act, False, False, 0)
+        g2 = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True)
+        act.pack_start(g2, False, False, 0)
+        self.add_button(g2, "锁屏", 0, 0, lambda *_: run(["xflock4"]))
+        self.add_button(g2, "重启", 1, 0, self.on_reboot)
+        self.add_button(g2, "关机", 0, 1, self.on_poweroff)
+
+        self.refresh()
+        GLib.timeout_add_seconds(2, self.refresh)
+
+    # ---------------------------------------------------------------- helpers
+    def row(self, title, sub, widget):
+        h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        t = Gtk.Label(label=title, xalign=0)
+        s = Gtk.Label(label=sub, xalign=0)
+        s.get_style_context().add_class("sub")
+        v.pack_start(t, False, False, 0)
+        v.pack_start(s, False, False, 0)
+        h.pack_start(v, True, True, 0)
+        widget.set_valign(Gtk.Align.CENTER)
+        h.pack_end(widget, False, False, 0)
+        return h
+
+    def slider_row(self, title, scale):
+        h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        lbl = Gtk.Label(label=title, xalign=0, width_chars=10)
+        h.pack_start(lbl, False, False, 0)
+        scale.set_hexpand(True)
+        scale.set_valign(Gtk.Align.CENTER)
+        h.pack_start(scale, True, True, 0)
+        return h
+
+    def add_button(self, grid, label, x, y, cb):
+        b = Gtk.Button(label=label)
+        b.get_style_context().add_class("action")
+        b.connect("clicked", cb)
+        grid.attach(b, x, y, 1, 1)
+
+    # ---------------------------------------------------------------- actions
+    def on_wifi(self, _, state):
+        run(["nmcli", "radio", "wifi", "on" if state else "off"])
+        return False
+
+    def on_bt(self, _, state):
+        run(["rfkill", "unblock" if state else "block", "bluetooth"])
+        return False
+
+    def on_brightness(self, scale):
+        val = int(scale.get_value())
+        path = os.path.join(BACKLIGHT, "brightness")
+        try:
+            subprocess.run(["sudo", "-n", "tee", path],
+                           input=f"{val}\n", text=True,
+                           capture_output=True, timeout=5)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def on_volume(self, scale):
+        val = int(scale.get_value())
+        run(["wpctl", "set-volume", AUDIO_SINK, f"{val}%"])
+
+    def on_drop_caches(self, *_):
+        subprocess.run(["sudo", "-n", "/usr/local/bin/tablet-drop-caches"],
+                       capture_output=True, timeout=20)
+        self.refresh()
+
+    def on_reboot(self, *_):
+        run(["systemctl", "reboot"], root=True)
+
+    def on_poweroff(self, *_):
+        run(["systemctl", "poweroff"], root=True)
+
+    # ---------------------------------------------------------------- status
+    def refresh(self):
+        cap, st = battery()
+        total, avail = meminfo()
+        temp = cpu_temp()
+        parts = []
+        if cap is not None:
+            parts.append(f"电量 {cap}%")
+        parts.append(f"内存 {total - avail}/{total} MB")
+        if temp:
+            parts.append(f"CPU {temp}°C")
+        self.status.set_text("   ".join(parts))
+        return True
+
+
+def main():
+    win = Settings()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,30 @@
+# build artefacts / device backups (never commit)
+*.img
+*.bin
+*.apk
+*.mbn
+*.elf
+*.so
+*.ko
+*.zst
+*.gz
+*.xz
+*.raw
+*.h264
+*.tar
+
+# per-machine / secret material
+*.pem
+*.key
+id_rsa*
+.env
+*password*
+secrets*
+
+# python / editor noise
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
+*.swp

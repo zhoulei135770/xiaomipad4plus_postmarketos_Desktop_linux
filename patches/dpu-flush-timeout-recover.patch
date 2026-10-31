@@ -1,0 +1,35 @@
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index 0000000..1111111 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -536,10 +536,30 @@ static int dpu_encoder_phys_vid_wait_for_commit_done(
+ 	ret = wait_event_timeout(phys_enc->pending_kickoff_wq,
+ 		(hw_ctl->ops.get_flush_register(hw_ctl) == 0),
+ 		msecs_to_jiffies(50));
+ 	if (ret <= 0) {
+-		DPU_ERROR("vblank timeout: %x\n", hw_ctl->ops.get_flush_register(hw_ctl));
+-		return -ETIMEDOUT;
++		u32 flush = hw_ctl->ops.get_flush_register(hw_ctl);
++
++		DPU_ERROR("vblank timeout: %x, recovering ctl\n", flush);
++
++		/*
++		 * SDM660 的 CTL 块偶尔不会把 pending flush 清掉：视频时序引擎
++		 * 随后就死了，面板停在最后一帧（或者黑屏只剩鼠标），之后每次
++		 * atomic commit 都是 -ETIMEDOUT，只能重启才能恢复。
++		 *
++		 * 这里主动复位 CTL 通路并清掉挂起位，让下一次 commit 能够重新
++		 * 编程流水线，而不是把显示彻底卡死。
++		 */
++		if (hw_ctl->ops.reset)
++			hw_ctl->ops.reset(hw_ctl);
++		if (hw_ctl->ops.wait_reset_status)
++			hw_ctl->ops.wait_reset_status(hw_ctl);
++		if (hw_ctl->ops.clear_pending_flush)
++			hw_ctl->ops.clear_pending_flush(hw_ctl);
++
++		return 0;
+ 	}
+ 
+ 	return 0;
+ }

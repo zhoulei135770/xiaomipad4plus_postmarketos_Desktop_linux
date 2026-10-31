@@ -1,0 +1,49 @@
+/*
+ * CPU OPP tables for SDM660 (Mi Pad 4 Plus / clover-plus)
+ *
+ * Frequencies and voltages decoded from the vendor device tree
+ * (miui-dtb-0.dtb):
+ *   /soc/cprh-ctrl@179c4000/thread@0/regulator  -> apc0_pwrcl_corner (silver, cpu0-3)
+ *   /soc/cprh-ctrl@179c8000/thread@0/regulator  -> apc1_perfcl_corner (gold,  cpu4-7)
+ *
+ * Voltage choice: we use the CPR *ceiling* for every corner, i.e. the vendor's
+ * "open loop" mode.  That is the value the hardware is allowed to use, so it is
+ * safe, just slightly less efficient than the closed loop CPR curve.
+ *
+ * STILL REQUIRED before this does anything:
+ *   - a `clk-cpu-660` driver for the CPU clock controller at 0x179c0000
+ *     (mainline only has clk-cpu-8996)
+ *   - the cpu@N nodes must point at these tables:
+ *         cpu0..3: operating-points-v2 = <&cpu_silver_opp>;
+ *         cpu4..7: operating-points-v2 = <&cpu_gold_opp>;
+ *     and the board must let cpufreq-dt bind (see cpufreq-dt-platdev).
+ */
+
+/ {
+	cpu_silver_opp: opp-table-0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-300000000   { opp-hz = /bits/ 64 <300000000>;   opp-microvolt = <724000>; };
+		opp-633600000   { opp-hz = /bits/ 64 <633600000>;   opp-microvolt = <724000>; };
+		opp-902400000   { opp-hz = /bits/ 64 <902400000>;   opp-microvolt = <724000>; };
+		opp-1113600000  { opp-hz = /bits/ 64 <1113600000>;  opp-microvolt = <788000>; };
+		opp-1401600000  { opp-hz = /bits/ 64 <1401600000>;  opp-microvolt = <868000>; };
+		opp-1536000000  { opp-hz = /bits/ 64 <1536000000>;  opp-microvolt = <1068000>; };
+		opp-1747200000  { opp-hz = /bits/ 64 <1747200000>;  opp-microvolt = <1068000>; };
+		opp-1843200000  { opp-hz = /bits/ 64 <1843200000>;  opp-microvolt = <1068000>; };
+	};
+
+	cpu_gold_opp: opp-table-1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-300000000   { opp-hz = /bits/ 64 <300000000>;   opp-microvolt = <724000>; };
+		opp-1113600000  { opp-hz = /bits/ 64 <1113600000>;  opp-microvolt = <724000>; };
+		opp-1401600000  { opp-hz = /bits/ 64 <1401600000>;  opp-microvolt = <788000>; };
+		opp-1747200000  { opp-hz = /bits/ 64 <1747200000>;  opp-microvolt = <868000>; };
+		opp-1958400000  { opp-hz = /bits/ 64 <1958400000>;  opp-microvolt = <988000>; };
+		opp-2150400000  { opp-hz = /bits/ 64 <2150400000>;  opp-microvolt = <988000>; };
+		opp-2208000000  { opp-hz = /bits/ 64 <2208000000>;  opp-microvolt = <1068000>; };
+	};
+};

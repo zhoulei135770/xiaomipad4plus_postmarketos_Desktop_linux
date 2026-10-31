@@ -1,0 +1,54 @@
+#!/bin/sh
+# Start Xorg on :0 and run LXQt inside it (same X setup as the XFCE session).
+LOGDIR="$HOME/.local/share/tablet-session"
+mkdir -p "$LOGDIR" 2>/dev/null
+LOG="$LOGDIR/lxqt-x-session.log"
+if ! { : >>"$LOG"; } 2>/dev/null; then LOG=/dev/null; fi
+log() { echo "[$(date '+%H:%M:%S')] $*" >>"$LOG" 2>/dev/null; }
+
+live_pid() {
+    for p in $(pgrep -x "$1" 2>/dev/null); do
+        st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+        if [ "$st" != "Z" ] && [ -n "$st" ]; then echo "$p"; return 0; fi
+    done
+    return 1
+}
+
+log "=== starting LXQt session ==="
+
+if live_pid Xorg >/dev/null 2>&1; then
+    log "reusing existing Xorg on :0"
+else
+    rm -f /tmp/.X0-lock 2>/dev/null
+    Xorg :0 -keeptty -dpi 150 -nolisten tcp >>"$LOG" 2>&1 &
+    XORG_PID=$!
+    log "Xorg pid=$XORG_PID"
+    i=0
+    while [ $i -lt 60 ]; do
+        kill -0 "$XORG_PID" 2>/dev/null || { log "Xorg died"; exit 1; }
+        DISPLAY=:0 xrandr --query >/dev/null 2>&1 && { log "X ready after ${i}s"; break; }
+        i=$((i+1)); sleep 1
+    done
+fi
+
+export DISPLAY=:0
+# Touch-friendly defaults for LXQt
+export QT_AUTO_SCREEN_SCALE_FACTOR=0
+export QT_SCALE_FACTOR=1
+export QT_FONT_DPI=150
+
+# Make sure a window manager is configured; openbox is our fallback WM.
+if ! grep -qs '^window_manager=' "$HOME/.config/lxqt/session.conf" 2>/dev/null; then
+    mkdir -p "$HOME/.config/lxqt"
+    if [ -f "$HOME/.config/lxqt/session.conf" ]; then
+        grep -q '^\[General\]' "$HOME/.config/lxqt/session.conf" || echo '[General]' >> "$HOME/.config/lxqt/session.conf"
+        sed -i '/^window_manager=/d' "$HOME/.config/lxqt/session.conf"
+        sed -i '/^\[General\]/a window_manager=openbox' "$HOME/.config/lxqt/session.conf"
+    else
+        printf '[General]\nwindow_manager=openbox\n' > "$HOME/.config/lxqt/session.conf"
+    fi
+    log "configured window_manager=openbox"
+fi
+
+log "exec startlxqt"
+exec dbus-run-session -- startlxqt

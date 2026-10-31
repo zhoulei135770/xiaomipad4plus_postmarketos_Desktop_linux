@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""tablet-autorotate - rotate the panel from the BMI120 accelerometer.
+
+iio-sensor-proxy cannot drive this sensor (the qcom-smgr driver provides no IIO
+trigger, and the proxy refuses to start reading without one), so this daemon
+reads /dev/iio:device2 itself and rotates from the gravity vector.
+
+    tablet-autorotate             run as a service
+    tablet-autorotate --calibrate print the gravity vector and detected label
+
+A manual choice (``tablet-rotate <mode>``) writes
+~/.config/tablet/rotation-manual and suspends automatic rotation until
+``tablet-rotate auto``.
+"""
+import math
+import os
+import struct
+import subprocess
+import sys
+import time
+
+OUTPUT = 'DSI-1'
+DEV = '/dev/iio:device2'
+SYS = '/sys/bus/iio/devices/iio:device2'
+MANUAL = os.path.expanduser('~/.config/tablet/rotation-manual')
+CONF = '/etc/tablet/rotation.conf'
+# 只有这个文件内容为 "on" 才根据重力自动旋转；否则守护进程只负责修复黑屏。
+AUTOROTATE_FLAG = '/etc/tablet/autorotate'
+
+STRIDE = 24
+TOUCH_HINTS = ('touchscreen', 'touch screen', 'goodix', 'fts_', 'synaptics', 'atmel', 'ilitek')
+
+MODES = {
+    'normal':   ('normal', 'normal'),
+    'inverted': ('inverted', 'normal'),
+    'left':     ('left', 'xy'),
+    'right':    ('left', 'normal'),
+}
+TOUCH_ANGLE = {'normal': 0, 'inverted': 180, 'left': 270, 'right': 90}
+
+# XInput coordinate transformation matrix per logical mode.  Unlike
+# "libinput Rotation Angle" this can also express a reflection, which our
+# landscape transform needs.
+CTM = {
+    'normal':   ['1', '0', '0', '0', '1', '0', '0', '0', '1'],
+    'inverted': ['-1', '0', '1', '0', '-1', '1', '0', '0', '1'],
+    # 'left' = xrandr left + reflect xy == a 90 deg clockwise image
+    #   native (u,v) -> screen (v, 1-u)
+    #   Verified on device: a tap at the physical top-left must land top-left.
+    'left':     ['0', '1', '0', '-1', '0', '1', '0', '0', '1'],
+    # 'right' = xrandr left == a 90 deg counter-clockwise image
+    #   native (u,v) -> screen (1-v, u)
+    'right':    ['0', '-1', '1', '1', '0', '0', '0', '0', '1'],
+}
+
+# label -> logical mode.  Labels are derived from the gravity vector; the
+# defaults below are a first guess and can be overridden in rotation.conf.
+DEFAULT_MAP = {
+    'x+': 'right',
+    'x-': 'left',
+    'y+': 'normal',
+    'y-': 'inverted',
+}
+
+TILT = 5.0          # m/s^2 on the horizontal axes to consider it "held up"
+HYSTERESIS = 1.5    # m/s^2 margin between the two candidate axes
+
+
+def env():
+    e = dict(os.environ)
+    e.setdefault('DISPLAY', ':0')
+    e.setdefault('XAUTHORITY', '/home/user/.Xauthority')
+    return e
+
+
+def read_conf():
+    m = dict(DEFAULT_MAP)
+    try:
+        for line in open(CONF):
+            line = line.split('#')[0].strip()
+            if '=' not in line:
+                continue
+            k, v = [x.strip() for x in line.split('=', 1)]
+            if not k or not v:
+                continue
+            if v in MODES:
+                m[k] = v
+    except FileNotFoundError:
+        pass
+    return m
+
+
+def fix_touch(mode):
+    """Align the touchscreen with the display using the CTM.
+
+    The XInput coordinate transformation matrix can express any rotation *and*
+    reflection, while ``libinput Rotation Angle`` can only rotate.  Our working
+    landscape transform is rotate+reflect, so the matrix is the only way to keep
+    taps and the finger in the same place.
+    """
+    mat = CTM[mode]
+    try:
+        out = subprocess.run(['xinput', 'list', '--short'], capture_output=True,
+                             text=True, env=env())
+    except FileNotFoundError:
+        return
+    for line in out.stdout.splitlines():
+        import re
+        mid = re.search(r'id=(\d+)', line)
+        if not mid:
+            continue
+        name = line.split('id=')[0]
+        for ch in ' \t⎜↳|┃\\':
+            name = name.replace(ch, ' ')
+        name = ' '.join(name.split()).lower()
+        if any(h in name for h in TOUCH_HINTS):
+            # 先把角度复位，避免角度与矩阵叠加
+            subprocess.run(['xinput', 'set-prop', mid.group(1),
+                            'libinput Rotation Angle', '0'],
+                           capture_output=True, text=True, env=env())
+            # xf86-input-libinput 有两个可用的变换：
+            #   Coordinate Transformation Matrix  — X 服务器侧
+            #   libinput Calibration Matrix       — libinput 侧（触摸面 -> 显示）
+            # 两个都设，确保任何一条生效路径都被覆盖。
+            subprocess.run(['xinput', 'set-prop', mid.group(1),
+                            'Coordinate Transformation Matrix'] + mat,
+                           capture_output=True, text=True, env=env())
+            subprocess.run(['xinput', 'set-prop', mid.group(1),
+                            'libinput Calibration Matrix'] + mat,
+                           capture_output=True, text=True, env=env())
+
+
+def classify(gx, gy, gz):
+    """Return a label describing how the tablet is being held."""
+    ax, ay, az = abs(gx), abs(gy), abs(gz)
+    if az > ax + HYSTERESIS and az > ay + HYSTERESIS:
+        return 'face-up' if gz > 0 else 'face-down'
+    mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+    # 斜着拿（45 度附近）时两个轴分量接近，切来切去会闪屏，直接判为模糊
+    if mag > 1 and ax < mag * 0.62 and ay < mag * 0.62:
+        return 'ambiguous'
+    if ax > TILT and ax > ay + HYSTERESIS:
+        return 'x+' if gx > 0 else 'x-'
+    if ay > TILT and ay > ax + HYSTERESIS:
+        return 'y+' if gy > 0 else 'y-'
+    return 'ambiguous'
+
+
+last = None
+kicked = False          # 启动后是否已做过一次 DPU 唤醒
+pending_label = None
+pending_since = 0.0
+STABLE_SECONDS = 1.5    # 方向必须稳定这么久才切换（采样率 100+Hz，按样本数没意义）
+
+
+def apply(mode, why=''):
+    global last, kicked
+    if mode == last:
+        return
+    rot, refl = MODES[mode]
+    # 守护进程启动后的第一次设置：先强制一次 normal 再设目标方向。
+    # X 重启后 DPU 有时不扫描输出主图层（黑屏只剩光标），
+    # 两次 modeset 能把它踢回来，这样开机就不用手动救。
+    if not kicked:
+        subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', 'normal'],
+                       capture_output=True, text=True, env=env())
+        time.sleep(0.6)
+        kicked = True
+    subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', rot, '--reflect', refl],
+                   capture_output=True, text=True, env=env())
+    fix_touch(mode)
+    print(f'[autorotate] {mode} ({why}) rot={rot} refl={refl}', flush=True)
+    last = mode
+
+
+def samples():
+    """Yield (x, y, z) raw samples from the IIO buffer.
+
+    The smgr driver sometimes stops delivering after a while; the fd is opened
+    non-blocking and the buffer is toggled when no data has arrived for 5 s, so
+    the daemon cannot get stuck (it used to sit idle for over an hour).
+    """
+    with open(os.path.join(SYS, 'buffer/enable'), 'w') as f:
+        f.write('1')
+    time.sleep(0.2)
+    fd = os.open(DEV, os.O_RDONLY | os.O_NONBLOCK)
+    buf = b''
+    last_data = time.time()
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 1024)
+                if chunk:
+                    last_data = time.time()
+                buf += chunk
+            except BlockingIOError:
+                time.sleep(0.02)
+            except OSError:
+                time.sleep(0.1)
+            if time.time() - last_data > 5.0:
+                # 数据流停了：关掉再重开缓冲，并重新打开设备节点
+                # （部分 IIO 驱动在缓冲重开后要求重新 open）
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                try:
+                    with open(os.path.join(SYS, 'buffer/enable'), 'w') as f:
+                        f.write('0')
+                    time.sleep(0.2)
+                    with open(os.path.join(SYS, 'buffer/enable'), 'w') as f:
+                        f.write('1')
+                    time.sleep(0.3)
+                except Exception:
+                    time.sleep(1)
+                fd = os.open(DEV, os.O_RDONLY | os.O_NONBLOCK)
+                buf = b''
+                last_data = time.time()
+                continue
+            while len(buf) >= STRIDE:
+                s, buf = buf[:STRIDE], buf[STRIDE:]
+                yield struct.unpack('<iii', s[:12])
+    finally:
+        os.close(fd)
+        with open(os.path.join(SYS, 'buffer/enable'), 'w') as f:
+            f.write('0')
+
+
+def learn(mode, scale, mapping):
+    """Sample the accelerometer and record which label means mode.
+
+    Run it while holding the tablet in the wanted orientation:
+        tablet-autorotate --learn left
+    """
+    import collections
+    seen = collections.Counter()
+    t0 = time.time()
+    for x, y, z in samples():
+        gx, gy, gz = x * scale, y * scale, z * scale
+        lab = classify(gx, gy, gz)
+        if lab not in ('ambiguous', 'face-up', 'face-down'):
+            seen[lab] += 1
+        if time.time() - t0 > 3.0:
+            break
+    if not seen:
+        print('没读到可判定的方向（请把平板立起来一点，别平放）')
+        return 1
+    lab = seen.most_common(1)[0][0]
+    mapping[lab] = mode
+    lines = ['# 传感器方向 -> 屏幕方向（由 --learn 生成）']
+    for k, v in sorted(mapping.items()):
+        lines.append(f'{k}={v}')
+    with open(CONF, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'  已学习: {lab} -> {mode}（写入 {CONF}）')
+    for k, v in sorted(mapping.items()):
+        print(f'    {k}={v}')
+    return 0
+
+
+def uptime():
+    try:
+        return float(open('/proc/uptime').read().split()[0])
+    except Exception:
+        return 0.0
+
+
+HEAL_HISTORY = '/run/tablet-heal-history'
+
+
+def read_heal_history():
+    """Timestamps of recent automatic reboots (capped to the last 30 minutes)."""
+    try:
+        import json
+        data = json.load(open(HEAL_HISTORY))
+    except Exception:
+        return []
+    now = time.time()
+    return [t for t in data if now - t < 1800]
+
+
+def write_heal_history(hist):
+    try:
+        import json
+        json.dump(hist[-3:], open(HEAL_HISTORY, 'w'))
+    except Exception:
+        pass
+
+
+_autorotate_cache = [0.0, False]
+
+
+def autorotate_on():
+    """True when /etc/tablet/autorotate contains "on" (cached for 3 s)."""
+    now = time.time()
+    if now - _autorotate_cache[0] > 3.0:
+        try:
+            v = open(AUTOROTATE_FLAG).read().strip().lower()
+        except Exception:
+            v = ''
+        _autorotate_cache[0] = now
+        _autorotate_cache[1] = (v == 'on')
+    return _autorotate_cache[1]
+
+
+def open_kmsg():
+    """Watch the kernel log for DPU wedge messages.
+
+    When the primary plane stops being scanned out, xrandr still reports the
+    requested mode, so the only reliable signal is the kernel complaining:
+
+        [drm:dpu_kms_wait_for_commit_done] wait for commit done returned -110
+        [drm:dpu_encoder_phys_vid_wait_for_commit_done] vblank timeout: 1000000
+    """
+    try:
+        fd = os.open('/dev/kmsg', os.O_RDONLY | os.O_NONBLOCK)
+    except Exception:
+        return None
+    try:                      # 丢掉已有的旧消息，只看新的
+        while os.read(fd, 65536):
+            pass
+    except OSError:
+        pass
+    return fd
+
+
+def count_wedge(fd):
+    """Drain kmsg; return (wedge messages, driver self-recoveries).
+
+    The patched msm module resets the CTL block on a flush timeout and logs
+    "recovering ctl".  When that happens the driver already fixed the
+    pipeline, so the daemon must NOT reboot the tablet.
+    """
+    if fd is None:
+        return 0, 0
+    hits = 0
+    rec = 0
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+        text = chunk.decode('utf-8', 'replace')
+        rec += text.count('recovering ctl')
+        hits += text.count('vblank timeout')
+        hits += text.count('commit done returned -110')
+    return hits, rec
+
+
+def force_modeset(mode):
+    """Recover the display, escalating from cheap to heavy.
+
+    A plain modeset sometimes leaves the DPU wedged (it keeps the black screen
+    with only the cursor), so the sequence is:
+
+      1. DPMS off -> on   (drops the DSI link and re-establishes it)
+      2. normal -> target modeset pair
+      3. touch matrix resync
+    """
+    rot, refl = MODES[mode]
+    # 1) 这台设备的 xrandr 没有 --dpms，X 里 DPMS 也是关的，
+    #    所以只能靠两次 modeset；若仍无效由上层调用者决定是否重启。
+    # 2) 两次 modeset 把主图层踢回来
+    subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', 'normal'],
+                   capture_output=True, text=True, env=env())
+    time.sleep(0.5)
+    subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', rot, '--reflect', refl],
+                   capture_output=True, text=True, env=env())
+    # 3) 触摸跟着复位
+    fix_touch(mode)
+
+
+def xrandr_line():
+    """Current xrandr line for our output, or None when X is not answering."""
+    try:
+        r = subprocess.run(['xrandr', '--query'], capture_output=True, text=True, env=env())
+    except FileNotFoundError:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith(OUTPUT):
+            return line.strip()
+    return None
+
+
+def heal(mode):
+    """Re-apply the mode when X restarted or the DPU wedged.
+
+    Symptom of the wedge: xrandr reports the wanted mode but the panel shows
+    only the cursor.  A normal -> target modeset pair brings it back.
+    """
+    global last
+    if mode is None:
+        return
+    line = xrandr_line()
+    rot, refl = MODES[mode]
+    if rot == 'left' and refl == 'xy':
+        ok = line is not None and 'left X and Y' in line
+    elif rot == 'left':
+        ok = line is not None and 'left' in line and 'X and Y' not in line
+    else:
+        ok = line is not None and f' {rot} ' in line
+    if ok:
+        return
+    print(f'[autorotate] heal: 状态不符/查询失败，强制重设 {mode}', flush=True)
+    force_modeset(mode)
+    last = mode
+
+
+def main():
+    global pending_label, pending_since
+    calibrate = '--calibrate' in sys.argv
+    try:
+        scale = float(open(os.path.join(SYS, 'in_accel_scale')).read().strip())
+    except Exception:
+        scale = 1.5258e-5
+
+    mapping = read_conf()
+
+    if '--learn' in sys.argv:
+        i = sys.argv.index('--learn')
+        if i + 1 >= len(sys.argv) or sys.argv[i + 1] not in MODES:
+            print('用法: tablet-autorotate --learn normal|inverted|left|right')
+            return 2
+        return learn(sys.argv[i + 1], scale, mapping)
+
+    print('[autorotate] mapping =', mapping, flush=True)
+
+    sx = sy = sz = 0.0
+    n = 0
+    heal_last_check = 0.0
+    kmsg = open_kmsg()
+    wedge_total = 0
+    last_wedge = 0.0
+    for x, y, z in samples():
+        if calibrate:
+            gx, gy, gz = x * scale, y * scale, z * scale
+            mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+            print(f'gx={gx:+6.2f} gy={gy:+6.2f} gz={gz:+6.2f} |g|={mag:5.2f} '
+                  f'-> {classify(gx, gy, gz)}', flush=True)
+            time.sleep(0.5)
+            continue
+
+        if os.path.exists(MANUAL):
+            time.sleep(1.0)
+            continue
+
+        # 每 3 秒校验一次屏幕状态，X 重启或 DPU 卡住时自动重设
+        if time.time() - heal_last_check > 3.0:
+            heal_last_check = time.time()
+            hits, rec = count_wedge(kmsg)
+            if rec:
+                # 补丁模块已经把 CTL 复位了，画面会自己回来，不要重启
+                print(f'[autorotate] 驱动自愈 {rec} 次，跳过重启', flush=True)
+                last_wedge = 0.0
+            elif hits:
+                wedge_total += hits
+                now = time.time()
+                print(f'[autorotate] 检测到 DPU 卡死消息 +{hits}（累计 {wedge_total}），强制 modeset',
+                      flush=True)
+                if last:
+                    force_modeset(last)
+                else:
+                    heal(None)
+                # 如果 60 秒内再次卡死，说明 modeset 救不回来 -> 重启。
+                # 但 30 分钟内最多重启 3 次，避免无限重启循环。
+                if now - last_wedge < 60:
+                    hist = read_heal_history()
+                    if len(hist) < 3:
+                        hist.append(now)
+                        write_heal_history(hist)
+                        print(f'[autorotate] modeset 无法恢复，重启设备'
+                              f'（30 分钟内第 {len(hist)} 次）', flush=True)
+                        subprocess.run(['systemctl', 'reboot'])
+                    else:
+                        print('[autorotate] 重启次数已达上限，继续尝试 modeset', flush=True)
+                last_wedge = now
+            else:
+                heal(last)
+
+        # 自动旋转关闭时：只保留上面的黑屏修复，不根据重力改变方向
+        if not autorotate_on():
+            pending_label = None
+            pending_since = 0.0
+            continue
+
+        # 简单低通，避免抖动
+        sx = sx * 0.8 + x * 0.2
+        sy = sy * 0.8 + y * 0.2
+        sz = sz * 0.8 + z * 0.2
+        n += 1
+        if n < 8:
+            continue
+        gx, gy, gz = sx * scale, sy * scale, sz * scale
+        label = classify(gx, gy, gz)
+        if label in ('face-up', 'face-down', 'ambiguous'):
+            pending_label = None
+            pending_since = 0.0
+            continue          # 平放/斜拿时保持当前方向
+        if label != pending_label:
+            pending_label = label
+            pending_since = time.time()
+        if time.time() - pending_since < STABLE_SECONDS:
+            continue
+        mode = mapping.get(label)
+        if mode:
+            apply(mode, f'{label} gx={gx:+.1f} gy={gy:+.1f}')
+            heal_last_check = time.time()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

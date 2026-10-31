@@ -1,0 +1,17 @@
+[Unit]
+Description=Keep the Qualcomm modem online (qmicli operating mode)
+# The modem boots in "shutting-down"/low-power and its firmware resets the
+# mode after each boot-time crash.  The helper polls QMI forever and puts it
+# back online; Type=simple so it never delays boot.
+After=qrtr.service network.target
+Wants=qrtr.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/modem-online.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

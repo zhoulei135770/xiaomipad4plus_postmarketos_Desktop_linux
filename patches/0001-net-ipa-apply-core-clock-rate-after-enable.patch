@@ -1,0 +1,71 @@
+From: user <user@localhost>
+Subject: [PATCH] net: ipa: apply the core clock rate after enabling it
+
+RPM-backed clocks (the qcom,clk-smd-rpm provider used on MSM8998, SDM660
+and friends) silently ignore clk_set_rate() while the clock is disabled:
+
+    static int clk_smd_rpm_set_rate(struct clk_hw *hw, unsigned long rate,
+                                    unsigned long parent_rate)
+    {
+            ...
+            if (!r->enabled)
+                    return 0;
+            ...
+    }
+
+ipa_power_init() requests the IPA core clock rate before the clock has
+ever been enabled, so on those platforms the rate is never programmed
+and the clock keeps its default rate.  On SDM660 this is visible as
+clk_get_rate() returning INT_MAX (the rpmcc default) even right after a
+successful clk_set_rate() call.
+
+Re-apply the requested rate in ipa_power_enable(), immediately after the
+core clock has been enabled, so the rate actually reaches the RPM.  The
+early request in ipa_power_init() is kept so clock providers that accept
+it before enable keep working as before.
+
+Tested on Xiaomi Mi Pad 4 (SDM660): clk_get_rate(ipa core clock) now
+reports the requested 75000000 Hz instead of 2147483647.
+
+---
+ drivers/net/ipa/ipa_power.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+--- a/drivers/net/ipa/ipa_power.c
++++ b/drivers/net/ipa/ipa_power.c
+@@ -45,6 +45,7 @@
+ struct ipa_power {
+ 	struct device *dev;
+ 	struct clk *core;
++	u32 core_rate;
+ 	struct qmp *qmp;
+ 	u32 interconnect_count;
+ 	struct icc_bulk_data interconnect[] __counted_by(interconnect_count);
+@@ -108,6 +109,19 @@
+ 				 power->interconnect);
+ 	}
+ 
++	/*
++	 * RPM-backed clocks ignore clk_set_rate() while the clock is
++	 * disabled, so the rate requested in ipa_power_init() has not
++	 * been applied yet.  Do it now that the clock is running.
++	 */
++	if (!ret && clk_get_rate(power->core) != power->core_rate) {
++		int r = clk_set_rate(power->core, power->core_rate);
++
++		if (r)
++			dev_warn(power->dev,
++				 "error %d setting core clock rate\n", r);
++	}
++
+ 	return ret;
+ }
+ 
+@@ -261,6 +275,7 @@
+ 	}
+ 	power->dev = dev;
+ 	power->core = clk;
++	power->core_rate = data->core_clock_rate;
+ 	power->interconnect_count = data->interconnect_count;
+ 
+ 	ret = ipa_interconnect_init(power, data->interconnect_data);

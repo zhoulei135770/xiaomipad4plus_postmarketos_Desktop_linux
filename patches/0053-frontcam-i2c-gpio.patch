@@ -1,0 +1,47 @@
+--- a/arch/arm64/boot/dts/qcom/sdm660-xiaomi-clover-plus.dts	2026-10-28 17:13:08.069665364 +0000
++++ b/arch/arm64/boot/dts/qcom/sdm660-xiaomi-clover-plus.dts	2026-10-28 17:13:08.069665364 +0000
+@@ -338,3 +338,44 @@
+ 		};
+ 	};
+ };
++
++/*
++ * Second I2C path to the front sensor, bit-banged on the same two wires that
++ * CCI master 1 uses (GPIO38/39).  The rear camera keeps GPIO36/37, so this does
++ * not disturb it.  Lets userspace tell "sensor dead" from "CCI master dead"
++ * with i2cdetect, independently of the CCI controller.
++ *
++ * 2 == GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN
++ */
++&tlmm {
++	frontcam_i2c_sda: frontcam-i2c-sda {
++		pins = "gpio38";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		output-high;
++	};
++
++	frontcam_i2c_scl: frontcam-i2c-scl {
++		pins = "gpio39";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		output-high;
++	};
++};
++
++/ {
++	i2c_gpio1: i2c-gpio-1 {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 38 2>;
++		scl-gpios = <&tlmm 39 2>;
++		i2c-gpio,delay-us = <100>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&frontcam_i2c_sda &frontcam_i2c_scl>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		status = "okay";
++	};
++};

@@ -1,0 +1,2 @@
+# xiaomipad4plus_postmarketos_Desktop_linux
+一个用postmarketos加xlqt做的小米平板4plus系统

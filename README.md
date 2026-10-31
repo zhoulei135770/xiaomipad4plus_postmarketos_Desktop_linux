@@ -169,3 +169,26 @@ screenshots/     界面截图
 - 本仓库的脚本与文档：**MIT**
 - 内核补丁：遵循 Linux 内核的 **GPL-2.0**
 - 引用的第三方项目版权归各自作者所有
+---
+
+## 支持这个项目（随缘打赏，不强制）
+
+这台平板从"能开机"到"能日常用"，前后折腾了几十个小时：调 DPU/GPU 卡死、
+修触摸标定、做锁屏和屏幕键盘、写恢复包、反复刷机验证。
+如果你觉得这个项目帮到了你，可以请我喝瓶水，让我有点动力继续维护：
+
+<table>
+<tr>
+<td align="center">
+  <img src="docs/sponsor/alipay.jpg" width="260" alt="支付宝"><br>
+  <b>支付宝</b>
+</td>
+<td align="center">
+  <img src="docs/sponsor/wechat.jpg" width="260" alt="微信支付"><br>
+  <b>微信支付</b>
+</td>
+</tr>
+</table>
+
+> 完全自愿，不打赏也照样能用、照样更新。
+> 比钱更管用的是：**star ⭐、提 issue 报 bug、把你的机型和结果告诉我**。

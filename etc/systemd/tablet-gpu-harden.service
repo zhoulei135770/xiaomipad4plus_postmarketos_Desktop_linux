@@ -1,0 +1,14 @@
+[Unit]
+Description=Adreno GPU stability knobs (preemption/eviction off, keep powered)
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=graphical.target
+Wants=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tablet-gpu-harden
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -445,3 +445,61 @@ mpv --vo=wlshm --ao=null 测试视频   # 若正确 → 合成器没问题，查
   命令一结束就整会话 SIGTERM（`Exiting due to channel error` 之类）。
   已在 `/etc/systemd/logind.conf` 设 `KillUserProcesses=no`。
 - 截图/测试窗口用 layer-shell 时需要 `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0`。
+
+---
+
+## 20. 更正：msm 是内置模块，modprobe.d 无效（2026-10-31 深夜）
+
+第 17.4 节写的 `/etc/modprobe.d/msm-gpu.conf` **对本机无效**：
+`msm` 是**编译进内核**的（`/sys/module/msm` 存在但 `lsmod` 里没有），
+`modprobe.d` 的 `options` 只对可加载模块生效。
+
+冷启动实测（重启后）：
+
+```
+enable_preemption  -1     ← 回到默认
+enable_eviction    Y
+GPU PM: auto
+```
+
+结果就是：开机后 GPU 又处于未加固状态，锁屏一起动就再次挂死。
+
+### 20.1 正确做法：systemd 服务在 graphical.target 之前写 sysfs
+
+```
+/usr/local/bin/tablet-gpu-harden
+/etc/systemd/system/tablet-gpu-harden.service      (WantedBy=multi-user.target)
+```
+
+服务内容：
+
+| 写入项 | 值 |
+|---|---|
+| `/sys/module/msm/parameters/enable_preemption` | 0 |
+| `/sys/module/msm/parameters/enable_eviction` | 0 |
+| `/sys/bus/platform/devices/5000000.gpu/power/control` | on |
+| `/sys/class/devfreq/5000000.gpu/max_freq` | 370000000 |
+
+服务设置 `Before=graphical.target`，保证**在合成器/锁屏启动前**完成加固。
+
+### 20.2 冷启动验证（两次）
+
+| 项目 | 重启后 |
+|---|---|
+| `enable_preemption` | **0** ✅ |
+| `enable_eviction` | **N** ✅ |
+| GPU `power/control` | **on** ✅ |
+| `FD_MESA_DEBUG` | nogrow,noindirect,sysmem ✅ |
+| transform / matrix | 90 / `0 -1 1 1 0 0 0 0 1` ✅ |
+| 开机锁屏 | 出现，可正常解锁 ✅ |
+| GPU hang | **0** ✅ |
+
+### 20.3 开机锁屏的启动时序
+
+```
+sysinit → tablet-gpu-harden（加固）→ graphical.target → labwc
+   → autostart: sleep 20 → tablet-pinlock
+   → autostart: tablet-rotate-restore（等 socket，设旋转+矩阵）
+```
+
+锁屏延迟 20 秒、加固提前完成，两者不再互相踩踏。

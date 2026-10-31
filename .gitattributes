@@ -1,0 +1,8 @@
+# normalise everything to LF in the repository
+* text=auto eol=lf
+
+# binary-ish files we may add later
+*.png binary
+*.jpg binary
+*.img binary
+*.zst binary

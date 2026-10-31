@@ -173,12 +173,12 @@ def asleep():
     return os.path.exists(SLEEP_STATE)
 
 
-LOCK_CMD = "/usr/bin/gtklock"
+LOCK_CMD = "/usr/local/bin/tablet-pinlock"
 
 
 def locked():
     try:
-        return subprocess.run(["/usr/bin/pgrep", "-f", "/usr/bin/gtklock"],
+        return subprocess.run(["/usr/bin/pgrep", "-f", "/usr/local/lib/tablet-pinlock.py"],
                               capture_output=True, timeout=5).returncode == 0
     except OSError:
         return False
@@ -186,7 +186,7 @@ def locked():
 
 def blank(env):
     if not locked():
-        run_as_user([LOCK_CMD, "-d"], env)
+        run_as_user([LOCK_CMD], env)
     subprocess.run(["/usr/local/bin/tablet-sleep"], capture_output=True,
                    timeout=15)
 

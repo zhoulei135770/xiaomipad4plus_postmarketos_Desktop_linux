@@ -1,0 +1,12 @@
+#!/bin/sh
+# tablet-pinlock - touch PIN lock (layer-shell overlay + numeric keypad)
+#
+# gtk4-layer-shell has to be preloaded when used from Python, otherwise the
+# library is initialised after libwayland and the layer surface fails.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+export GDK_BACKEND=wayland
+export HOME=${HOME:-/home/user}
+LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0
+export LD_PRELOAD
+exec /usr/bin/python3 /usr/local/lib/tablet-pinlock.py "$@"

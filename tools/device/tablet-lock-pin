@@ -1,0 +1,31 @@
+#!/bin/sh
+# tablet-lock-pin - manage the PIN used by tablet-pinlock
+#
+#   tablet-lock-pin set <pin>   change the PIN (4-6 digits)
+#   tablet-lock-pin show        show whether a PIN is set (hash only)
+#   tablet-lock-pin reset       restore the default PIN 1234
+set -e
+F=/etc/tablet-lock-pin
+
+case "${1:-}" in
+set)
+	pin=${2:-}
+	case "$pin" in
+		''|*[!0-9]*) echo "PIN 必须是 4-6 位数字"; exit 2 ;;
+	esac
+	[ ${#pin} -ge 4 ] && [ ${#pin} -le 6 ] || { echo "PIN 必须是 4-6 位数字"; exit 2; }
+	printf '%s' "$pin" | sha256sum | cut -d' ' -f1 > "$F"
+	chmod 644 "$F"
+	echo "PIN 已更新（${#pin} 位）"
+	;;
+show)
+	[ -f "$F" ] && echo "PIN hash: $(cat "$F")" || echo "未设置（默认 1234）"
+	;;
+reset)
+	printf '%s' 1234 | sha256sum | cut -d' ' -f1 > "$F"
+	chmod 644 "$F"
+	echo "PIN 已重置为默认 1234"
+	;;
+*)
+	echo "用法: tablet-lock-pin {set <pin>|show|reset}"; exit 2 ;;
+esac

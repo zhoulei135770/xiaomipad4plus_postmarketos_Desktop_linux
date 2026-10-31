@@ -190,3 +190,70 @@ exec /usr/bin/lxqt-qdbus openmenu
   `metadata::trusted=true`（`gio set`，需要 `XDG_RUNTIME_DIR`）；
 - **OTG 在硬复位后会失效**（SMB2 的 CC 检测读不到任何东西，`dfp=0`、强制 `otg_vbus=1` 也无枚举），
   **重启后自愈** —— 硬复位后 PMIC/USB-C 状态不一致，属已知现象，不用改软件。
+
+---
+
+## 12. 触摸 PIN 锁（取代 gtklock）
+
+### 12.1 为什么 gtklock 不行
+
+gtklock 用的是 **`ext-session-lock`**：锁定时整个会话被它独占，
+**任何第三方屏幕键盘都画不出来**。实测两种 OSK 都被盖住：
+
+| 方案 | 结果 |
+|---|---|
+| `wvkbd`（layer-shell 虚拟键盘） | 进程在跑，但被 gtklock 的全屏 surface 遮住 |
+| `squeekboard`（输入法协议） | `Panel has been configured, but no request is pending`，GTK4/labwc 不触发 text-input |
+
+而这台平板**没有硬件键盘**，所以 gtklock 等于"锁死自己"。
+
+### 12.2 方案：自带数字键盘的 PIN 锁
+
+`tablet-pinlock`（GTK4 + **gtk4-layer-shell**）：
+
+- 覆盖全屏的 layer-shell surface（overlay 层、四边锚定、键盘独占）；
+- 显示时钟/日期、PIN 圆点、0–9 数字键盘 + ⌫ + OK；
+- PIN 以 **sha256** 存在 `/etc/tablet-lock-pin`（默认 **1234**，4–6 位）；
+- 输错清空并提示"PIN 错误"，输对后退出、回到桌面。
+
+文件：
+
+```
+/usr/local/bin/tablet-pinlock        启动包装（设置 LD_PRELOAD 后 exec python）
+/usr/local/lib/tablet-pinlock.py     主程序
+/usr/local/bin/tablet-lock-pin       PIN 管理：set <pin> | show | reset
+/etc/tablet-lock-pin                 PIN 的 sha256
+```
+
+### 12.3 关键坑：Python 用 gtk4-layer-shell 需要 LD_PRELOAD
+
+直接 `import Gtk4LayerShell` 会报：
+
+```
+Failed to initialize layer surface, GTK4 Layer Shell may have been linked after libwayland
+```
+
+因为 Python 动态加载 so 的时机晚于 libwayland。解法：
+
+```sh
+export LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0
+```
+
+包装脚本已经内置这一行。
+
+### 12.4 触发方式
+
+| 场景 | 行为 |
+|---|---|
+| 短按电源键 | 启动 `tablet-pinlock` + 关背光 |
+| 开机 | labwc autostart 里延迟 3 秒启动 `tablet-pinlock` |
+| 解锁 | 触摸输入 PIN → OK |
+
+`tablet-powerkeyd` 通过 `pgrep -f /usr/local/lib/tablet-pinlock.py` 判断"是否已锁"，
+所以重复按电源键不会叠加多个实例。
+
+### 12.5 安全性说明
+
+这是**应用层锁**（不是 `ext-session-lock`）：能挡住日常误触和普通用户，
+但技术上不是内核/合成器级别的会话锁。考虑到"没有键盘就先得能进去"，
+这是在可用性与安全性之间的取舍。

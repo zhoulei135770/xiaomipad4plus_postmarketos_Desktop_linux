@@ -1,0 +1,62 @@
+#!/bin/sh
+# tablet-rotate-restore - apply the rotation the user chose in 平板设置.
+#
+# Runs at session start.  It must wait for the compositor's Wayland socket:
+# if wlr-randr runs too early it fails and the screen keeps its default
+# orientation while the touch matrix stays at the previous value (taps end up
+# 90/180 degrees off).
+CFG=/home/zhoulei/.config/tablet
+AUTO=$(cat "$CFG/auto-rotate" 2>/dev/null || echo on)
+STATE=$(cat "$CFG/rotation-state" 2>/dev/null || echo left)
+case "$STATE" in
+	normal|left|inverted|right) ;;
+	*) STATE=left ;;
+esac
+
+export XDG_RUNTIME_DIR=/run/user/10000
+WL="${WAYLAND_DISPLAY:-wayland-0}"
+while [ ! -S "$XDG_RUNTIME_DIR/$WL" ] && [ ! -S "$XDG_RUNTIME_DIR/$WL.lock" ]; do
+	sleep 0.5
+done
+export WAYLAND_DISPLAY="$WL"
+
+# wait until wlr-randr can actually talk to the compositor (max 20 s)
+i=0
+while [ "$i" -lt 40 ]; do
+	if wlr-randr >/dev/null 2>&1; then
+		break
+	fi
+	i=$((i + 1))
+	sleep 0.5
+done
+
+if [ "$AUTO" = "on" ]; then
+	exec /usr/local/bin/tablet-rotate auto
+fi
+
+want_transform() {
+	case "$1" in
+		left) echo 90 ;;
+		right) echo 270 ;;
+		inverted) echo 180 ;;
+		*) echo normal ;;
+	esac
+}
+
+apply() {
+	/usr/local/bin/tablet-rotate "$STATE" >/dev/null 2>&1
+}
+
+apply
+want=$(want_transform "$STATE")
+for _ in 1 2 3 4 5; do
+	got=$(wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}')
+	if [ "$got" = "$want" ]; then
+		exit 0
+	fi
+	sleep 1
+	apply
+done
+
+echo "tablet-rotate-restore: wanted $want, got ${got:-none}" >&2
+exit 1

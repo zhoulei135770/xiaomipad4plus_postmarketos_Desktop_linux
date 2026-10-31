@@ -343,3 +343,105 @@ ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="
 | `grim` | 截图 |
 | `wtype` | 注入键盘事件（测输入法/中文候选） |
 | `journalctl -b -1` | 上一次启动的日志（假死分析主力） |
+
+---
+
+## 17. GPU 卡死 / 黑屏 / 画面闪烁的最终解法（2026-10-31 夜）
+
+### 17.1 三种表现，一个根源
+
+| 表现 | 说明 |
+|---|---|
+| 整机硬死（SSH 也不响应） | hangcheck 恢复失败 → CPU 关中断死循环 → RCU stall |
+| 黑屏但有背光 | hangcheck 恢复成功，但显示管线没恢复（系统还活着） |
+| 画面/控件闪烁、文字乱码 | 渲染路径产出的画面本身错误 |
+
+日志里的统一特征：
+
+```
+[drm:adreno_idle] *ERROR* 5.1.2.0: timeout waiting to drain ringbuffer 0
+msm_dpu: CP | opcode error | possible opcode=0x00000000
+gpu fault ring 0 ... ib1 000000000A4DB000/0000      ← IB 长度是 0！
+[drm:hangcheck_handler] hangcheck detected gpu lockup rb 0!
+[drm:recover_worker] offending task: labwc
+```
+
+**关键判据：`ib1 .../0000`（提交的 IB 长度为 0）** —— 这是命令缓冲层面的问题，不是 zap 固件。
+
+### 17.2 关于 zap：不是原因
+
+内核日志里有：
+
+```
+Zap shader not enabled - using SECVID_TRUST_CNTL instead
+```
+
+这是**下游（Android 风格）msm 驱动**的正常分支：bootloader 已经设好 `SECVID_TRUST_CNTL`，
+驱动不加载 zap 也能正常工作。设备树里 `zap-shader` 属性长度是 0，
+`/lib/firmware/qcom/a512_zap.*` 虽然存在但不会被用到——**不是缺固件**。
+
+### 17.3 真正的根因：下游内核 + 上游 Mesa 的命令缓冲不兼容
+
+内核是下游 msm（7.0.14-sdm660），用户态是上游 Mesa/freedreno。
+上游 Mesa 会用一些较新的路径（可增长的 cmdstream、硬件间接绘制），
+下游内核实现不一致 → 提交出长度 0 的 IB → CP 取到空 opcode → 卡死。
+
+### 17.4 生效的修复组合（四层）
+
+| 层 | 配置 | 位置 |
+|---|---|---|
+| 内核 | `enable_preemption=0`、`enable_eviction=0` | `/etc/modprobe.d/msm-gpu.conf` |
+| 内核 | GPU 运行时电源常开 | `/sys/bus/platform/devices/5000000.gpu/power/control=on` |
+| 会话 | `FD_MESA_DEBUG=nogrow,noindirect,sysmem` | `/usr/local/bin/tablet-wayland-session` |
+| 应用 | Firefox 必须**原生 Wayland** | `/usr/local/bin/tablet-firefox`（桌面图标「浏览器」） |
+
+说明：
+- `nogrow` / `noindirect` 去掉会产生零长度 IB 的路径；
+- `sysmem` 关掉分块（tiling）渲染 —— 画面正确性优先；
+- 只加 `nobin` 时画面会**闪烁/文字错乱**，最终用 `sysmem` 才正确；
+- Firefox 走 XWayland 时闪烁，强制 `MOZ_ENABLE_WAYLAND=1` + `GDK_BACKEND=wayland` 后正常。
+
+### 17.5 验证结果
+
+| 测试 | 结果 |
+|---|---|
+| 哔哩哔哩播放 10 分钟 | **DRM 错误 0 次**，labwc 存活，GPU 频率在 19/160/266/370 MHz 动态调节 |
+| mpv 软输出全屏播放测试图 | 画面完全正确（证明合成器本身没问题） |
+| Firefox 原生 Wayland | 闪烁与乱码消失 |
+
+### 17.6 排查命令备忘
+
+```sh
+# 是否 GPU 卡死
+journalctl -b -1 | grep -iE "adreno_idle|opcode error|hangcheck|gpu fault|recover_worker"
+# 挂死细节（需 hang_debug=Y）
+dmesg | grep -iE "ringbuffer|CP \||hangcheck"
+# 画面问题先分清是合成器还是应用
+mpv --vo=wlshm --ao=null 测试视频   # 若正确 → 合成器没问题，查应用
+```
+
+## 18. 旋转与触摸矩阵的耦合（重要）
+
+链路：**平板设置 → `tablet-rotate` → `tablet-touch-matrix`**（同时改屏幕旋转和触摸矩阵）。
+
+| 错误做法 | 后果 |
+|---|---|
+| 在 autostart 里单独写 `wlr-randr --transform 90` | 只改屏幕不改矩阵 → 触摸差 90°/180° |
+| 会话刚启动就跑 `wlr-randr` | Wayland socket 未就绪 → 旋转失败，矩阵却已改 → 错位 |
+| 改完 udev 规则不重启会话 | libinput 只在打开设备时读矩阵 |
+
+正确做法：
+
+- `/usr/local/bin/tablet-rotate-restore`：等 Wayland socket + 等 `wlr-randr` 可用，
+  按 `~/.config/tablet/{auto-rotate,rotation-state}` 恢复，并**校验+重试**；
+- `tablet-orientd` 的 `set_transform()` 已修：`wlr-randr` 失败就不再动矩阵，`0` 映射成 `normal`；
+- 想改方向就用「平板设置」，能持久化。
+
+## 19. 其他教训
+
+- **不要随便 `systemctl restart systemd-logind`**：会收回图形会话的 seat，
+  合成器报 `Atomic commit failed: Permission denied` 并退回内核控制台。
+- 通过 `su -c 'setsid ...'` 启动的 GUI 程序会被 logind 当成独立会话，
+  命令一结束就整会话 SIGTERM（`Exiting due to channel error` 之类）。
+  已在 `/etc/systemd/logind.conf` 设 `KillUserProcesses=no`。
+- 截图/测试窗口用 layer-shell 时需要 `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0`。

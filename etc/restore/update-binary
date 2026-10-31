@@ -1,62 +1,120 @@
 #!/sbin/sh
 # TWRP restore script for Xiaomi Mi Pad 4 Plus (clover) - postmarketOS
 #
-# Layout (device keeps its Android partition table):
-#   boot        -> boot.img (kernel + dtb + cmdline)
-#   userdata    -> ext4 rootfs (pmOS), usually /dev/mmcblk1p64
+# Device keeps its Android partition table:
+#   boot      -> boot.img (kernel + dtb + cmdline, contains pmos_root_uuid)
+#   userdata  -> ext4 rootfs (pmOS)
 #
-# IMPORTANT: everything is streamed.  TWRP's /tmp is a RAM-backed tmpfs
-# (~2 GB on this device) and the rootfs is ~2.6 GB, so extracting to /tmp
-# would always fail.  `unzip -p ... | tar -xz -C /data` keeps memory use flat.
+# FOUR things learned the hard way on real hardware (2026-10-31):
+#
+#  1. TWRP mounts userdata at /data AND exposes a storage view at /sdcard.
+#     Extracting into /sdcard lands the tree under /data/media/... and the
+#     initramfs then reports "Root partition does not contain a root
+#     filesystem".  The tree MUST go to the filesystem root (/data).
+#
+#  2. "Wipe -> Format Data" (and TWRP's own format) creates a NEW ext4 UUID,
+#     but the kernel cmdline and /etc/fstab still reference the old one, so
+#     the device drops into the initramfs debug shell.  We restore both UUID
+#     and label afterwards with tune2fs.
+#
+#  3. TWRP's /tmp is a RAM tmpfs (~2 GB): everything is streamed, never staged.
+#
+#  4. TWRP cannot mmap very large zip files ("映射文件失败"), so the rootfs is
+#     shipped as numbered parts under 2 GiB each and concatenated on the fly.
 set -u
 
 OUTFD=/proc/self/fd/$2
-ui_print() { echo "ui_print $1" > "$OUTFD"; echo "ui_print" > "$OUTFD"; }
+ui_print() { echo "ui_print $1" > "$OUTFD" 2>/dev/null; echo "ui_print" > "$OUTFD" 2>/dev/null; }
 abort() { ui_print "! $1"; exit 1; }
 
 ZIP=$3
+ROOT_UUID=8def993b-42f5-4ba1-9813-c046e498fe22
+ROOT_LABEL=pmOS
+
 ui_print "==== clover postmarketOS restore ===="
 
 # ---------------------------------------------------------------- partitions
 BOOT=""
 for c in boot boot_a; do
-	[ -e "/dev/block/bootdevice/by-name/$c" ] && BOOT="/dev/block/bootdevice/by-name/$c" && break
+	if [ -e "/dev/block/bootdevice/by-name/$c" ]; then BOOT="/dev/block/bootdevice/by-name/$c"; break; fi
 done
 [ -n "$BOOT" ] || abort "boot partition not found"
 
 USERDATA=""
 for c in userdata; do
-	[ -e "/dev/block/bootdevice/by-name/$c" ] && USERDATA="/dev/block/bootdevice/by-name/$c" && break
+	if [ -e "/dev/block/bootdevice/by-name/$c" ]; then USERDATA="/dev/block/bootdevice/by-name/$c"; break; fi
 done
-[ -n "$USERDATA" ] || USERDATA=/dev/block/mmcblk1p64
+[ -n "$USERDATA" ] || USERDATA=/dev/block/mmcblk0p64
 
 ui_print "boot     : $BOOT"
 ui_print "userdata : $USERDATA"
 
 # ---------------------------------------------------------------- 1. boot.img
-ui_print "Checking boot.img in the zip ..."
-unzip -l "$ZIP" boot.img >/dev/null 2>&1 || abort "boot.img missing in zip"
 ui_print "Flashing boot.img ..."
-# stream straight to the partition (no /tmp copy)
-unzip -p "$ZIP" boot.img | dd of="$BOOT" bs=1M || abort "dd boot failed"
+unzip -p "$ZIP" boot.img >/dev/null 2>&1 || abort "boot.img missing in zip"
+unzip -p "$ZIP" boot.img | dd of="$BOOT" bs=1048576 2>/dev/null || abort "dd boot failed"
 ui_print "boot.img flashed"
 
-# ---------------------------------------------------------------- 2. rootfs
-ui_print "Mounting userdata ..."
-mkdir -p /data
-mountpoint -q /data || mount -t ext4 -o rw "$USERDATA" /data 2>/dev/null
-mountpoint -q /data || abort "cannot mount userdata"
+# ------------------------------------------------- mount userdata at /data
+# Prefer the canonical mount point; if TWRP mounted it elsewhere, unmount that
+# and remount at /data so the tree lands at the filesystem root.
+if ! mountpoint -q /data; then
+	ui_print "Mounting userdata at /data ..."
+	mkdir -p /data
+	mount -t ext4 -o rw "$USERDATA" /data || {
+		# fall back: whatever mount point exists for this partition
+		ALT=$(awk -v d="$USERDATA" '$1==d {print $2; exit}' /proc/mounts)
+		[ -n "$ALT" ] || ALT=$(awk '$1=="/dev/block/mmcblk0p64" {print $2; exit}' /proc/mounts)
+		[ -n "$ALT" ] || abort "cannot mount userdata"
+		ui_print "using existing mount point: $ALT"
+	}
+fi
+MNT=/data
+mountpoint -q "$MNT" || abort "/data is not a mount point"
+ui_print "target root: $MNT"
 
-ui_print "Extracting rootfs (streamed, ~2.6 GB, be patient) ..."
-rm -rf /data/lost+found 2>/dev/null
-unzip -p "$ZIP" rootfs.tar.gz | tar -xz -C /data --numeric-owner || abort "extract failed"
+# ---------------------------------------------------------------- 2. rootfs
+PARTS=$(unzip -l "$ZIP" 2>/dev/null | awk '{print $4}' | grep -E '^rootfs\.tar\.gz\.[0-9]+$' | sort)
+if [ -z "$PARTS" ]; then
+	PARTS="rootfs.tar.gz"
+	unzip -p "$ZIP" rootfs.tar.gz >/dev/null 2>&1 || abort "rootfs.tar.gz missing in zip"
+fi
+ui_print "rootfs parts:"
+for p in $PARTS; do ui_print "  $p"; done
+
+ui_print "Extracting rootfs (streamed) to $MNT ..."
+rm -rf "$MNT/lost+found" 2>/dev/null
+(
+	for p in $PARTS; do
+		unzip -p "$ZIP" "$p" || exit 1
+	done
+) | tar -xz -C "$MNT" || abort "extract failed"
 ui_print "rootfs extracted"
 
-# ---------------------------------------------------------------- 3. tidy
-chown 0:0 /data 2>/dev/null
-chmod 755 /data 2>/dev/null
+# ------------------------------------------- 3. sanity: is it a real rootfs?
+[ -e "$MNT/sbin/init" ] || [ -e "$MNT/usr/lib/systemd/systemd" ] || abort "extracted tree has no init - wrong target?"
+ui_print "rootfs looks valid (init present)"
+
+# ------------------------------------------- 4. restore UUID + label
+if [ -x /sbin/tune2fs ] || [ -x /system/bin/tune2fs ] || command -v tune2fs >/dev/null 2>&1; then
+	umount "$MNT" 2>/dev/null
+	sync
+	e2fsck -f -y "$USERDATA" >/dev/null 2>&1
+	CUR_UUID=$(blkid -s UUID -o value "$USERDATA" 2>/dev/null)
+	ui_print "current UUID: $CUR_UUID"
+	if [ "$CUR_UUID" != "$ROOT_UUID" ]; then
+		ui_print "restoring UUID -> $ROOT_UUID"
+		tune2fs -U "$ROOT_UUID" -L "$ROOT_LABEL" "$USERDATA" 2>/dev/null \
+			|| ui_print "! tune2fs failed; boot will need pmos_root_uuid fix"
+	else
+		tune2fs -L "$ROOT_LABEL" "$USERDATA" 2>/dev/null
+	fi
+	ui_print "UUID now: $(blkid -s UUID -o value "$USERDATA" 2>/dev/null)"
+else
+	ui_print "! tune2fs not available - UUID was not restored"
+fi
+
 sync
 ui_print "sync done"
-
 ui_print "==== finished: reboot to system ===="
 exit 0

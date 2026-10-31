@@ -1,0 +1,53 @@
+#!/bin/sh
+# Pseudo-sleep: blank the panel without entering kernel suspend.
+#
+# This device cannot suspend: mdss_runtime_suspend deadlocks the kernel (see
+# /var/log/mdss-suspend-bug.txt). So instead of sleeping we turn the panel off
+# and stop pushing frames. Instant wake, zero hang risk.
+#
+#   tablet-sleep            -> sleep now
+#   tablet-sleep wake       -> wake up
+#   tablet-sleep status     -> show state
+set -u
+BL=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
+STATE=/run/tablet-sleep.saved
+export DISPLAY=:0
+export XDG_RUNTIME_DIR=/run/user/10000
+
+do_sleep() {
+    [ -e "$BL/brightness" ] || { echo "no backlight device"; exit 1; }
+    cur=$(cat "$BL/brightness" 2>/dev/null)
+    echo "${cur:-200}" > "$STATE" 2>/dev/null
+    # DPMS off first: stops the compositor from sending new frames, so the
+    # panel is genuinely idle rather than just dimmed.
+    xset +dpms 2>/dev/null
+    xset dpms force off 2>/dev/null
+    echo 0 > "$BL/brightness" 2>/dev/null
+    echo "asleep (backlight was ${cur:-200}); run: tablet-sleep wake"
+}
+
+do_wake() {
+    xset +dpms 2>/dev/null
+    xset dpms force on 2>/dev/null
+    if [ -f "$STATE" ]; then
+        v=$(cat "$STATE" 2>/dev/null)
+        case "$v" in ''|*[!0-9]*) v=200 ;; esac
+        echo "$v" > "$BL/brightness" 2>/dev/null
+        rm -f "$STATE"
+        echo "awake (brightness restored to $v)"
+    else
+        echo 200 > "$BL/brightness" 2>/dev/null
+        echo "awake (brightness 200)"
+    fi
+}
+
+case "${1:-sleep}" in
+    sleep|off) do_sleep ;;
+    wake|on)   do_wake ;;
+    status)
+        echo "  backlight : $(cat "$BL/brightness" 2>/dev/null)/$(cat "$BL/max_brightness" 2>/dev/null)"
+        echo "  saved     : $(cat "$STATE" 2>/dev/null || echo '-')"
+        echo "  dpms      : $(DISPLAY=:0 xset q 2>/dev/null | grep -c 'DPMS is Enabled' | sed 's/1/Enabled/; s/0/Disabled/')"
+        ;;
+    *) echo "usage: $0 [sleep|wake|status]"; exit 2 ;;
+esac

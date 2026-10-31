@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""tablet-powerkeyd - power key + any-input wake for the Mi Pad 4 Plus.
+
+Two jobs:
+
+  * power key (pm8941_pwrkey, KEY_POWER): toggle the panel between blanked
+    and lit.  logind on this image refuses HandlePowerKey=lock-session, so the
+    key is handled here instead.
+  * any other input device (touch, keyboard, mouse): if the panel is blanked,
+    light it up again.  X's DPMS does NOT unblank on input by itself (measured:
+    injected motion/key left /sys/class/drm/card*-DSI-1/dpms at "Off").
+
+State is read from the DRM connector because `xset q` always says
+"Monitor is On".
+"""
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+EV_KEY = 1
+EV_REL = 2
+EV_ABS = 3
+EV_MSC = 4
+KEY_POWER = 116
+EVENT_FMT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FMT)
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def session_env():
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if f.read().strip() != "xfce4-session":
+                    continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = dict(kv.split(b"=", 1) for kv in f.read().split(b"\0") if b"=" in kv)
+        except OSError:
+            continue
+        return {
+            "DISPLAY": env.get(b"DISPLAY", b":0").decode(),
+            "DBUS_SESSION_BUS_ADDRESS": env.get(b"DBUS_SESSION_BUS_ADDRESS", b"").decode(),
+            "XDG_RUNTIME_DIR": "/run/user/10000",
+            "XAUTHORITY": "/home/user/.Xauthority",
+        }
+    return {"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/run/user/10000",
+            "XAUTHORITY": "/home/user/.Xauthority"}
+
+
+def as_user(argv, env):
+    e = dict(os.environ)
+    e.update(env)
+    return subprocess.run(
+        ["/usr/sbin/setpriv", "--reuid=10000", "--regid=10000", "--clear-groups",
+         "--", *argv],
+        env=e, capture_output=True, text=True, timeout=20)
+
+
+def dpms_state():
+    for p in glob.glob("/sys/class/drm/card*-DSI-*/dpms"):
+        try:
+            with open(p) as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return "unknown"
+
+
+def blank(env):
+    as_user(["/usr/sbin/xset", "dpms", "force", "off"], env)
+
+
+def unblank(env):
+    as_user(["/usr/sbin/xset", "dpms", "force", "on"], env)
+
+
+def dev_name(path):
+    try:
+        with open(f"/sys/class/input/{os.path.basename(path)}/device/name") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def main():
+    fds = {}
+    for p in sorted(glob.glob("/dev/input/event*")):
+        name = dev_name(p)
+        try:
+            fds[os.open(p, os.O_RDONLY)] = (p, name)
+        except OSError:
+            continue
+    if not fds:
+        log("no input devices")
+        return 1
+    log("watching " + ", ".join(f"{n or os.path.basename(p)}" for p, n in fds.values()))
+
+    last_wake = 0.0
+    while True:
+        ready, _, _ = select.select(list(fds), [], [], 2.0)
+        for fd in ready:
+            path, name = fds[fd]
+            try:
+                data = os.read(fd, EVENT_SIZE)
+            except OSError:
+                continue
+            if len(data) < EVENT_SIZE:
+                continue
+            _s, _u, typ, code, val = struct.unpack(EVENT_FMT, data)
+            if typ not in (EV_KEY, EV_REL, EV_ABS):
+                continue                     # ignore sync/msc noise
+
+            env = session_env()
+            try:
+                if "pwrkey" in name.lower():
+                    if typ == EV_KEY and code == KEY_POWER and val == 1:
+                        st = dpms_state()
+                        if st == "Off":
+                            log("power key: display on")
+                            unblank(env)
+                        else:
+                            log(f"power key: display off (was {st})")
+                            blank(env)
+                        time.sleep(0.3)
+                else:
+                    if dpms_state() == "Off" and time.time() - last_wake > 0.5:
+                        last_wake = time.time()
+                        log(f"input on {name or path}: display on")
+                        unblank(env)
+            except Exception as exc:          # noqa: BLE001
+                log(f"action failed: {exc}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

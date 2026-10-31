@@ -30,7 +30,8 @@ flashable distribution; the device runs
 | **Fingerprint** | ❌ | FPC1020 controllable, imaging lives in a closed TEE TA |
 | Default camera app (GNOME Snapshot) | ❌ | libcamera cannot handle this raw-bayer pipeline |
 | Charging / fuel gauge / USB-C role | ✅ | SMB2 + auto role switching |
-| Suspend / resume | ⚠️ | not verified |
+| Suspend / resume | ❌ real suspend blocked | `mdss_runtime_suspend` deadlocks the kernel; a *pseudo-sleep* (panel + frame stop, instant wake) is used instead. Power key handled by `tablet-powerkeyd`, logind told to ignore it → [`docs/67`](docs/67-SUSPEND-POWERKEY.md) |
+| Lock screen | ➖ not present | power key blanks the panel instead of locking |
 | Sensors (accel/gyro/mag/prox/ALS/hall) | ✅ | via `qcom_smgr` |
 
 Legend: ✅ works · 🔧 partial · ⚠️ unverified · ❌ not working (root cause documented).

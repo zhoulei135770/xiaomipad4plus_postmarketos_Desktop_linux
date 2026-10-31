@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""tablet-cam - take a still with the rear camera, with a simple auto-exposure.
+
+There is no 3A in mainline, so this does a coarse AE loop in userspace:
+capture a frame, measure its mean level, move exposure/gain, repeat, then save
+the final RAW10 frame **and develop it into a viewable PNG on the device**
+(via /usr/local/lib/tablet-cam/develop.py).
+
+    tablet-cam [out.raw] [--target 450] [--iters 5]
+    tablet-cam photo.raw --no-develop      # RAW only
+
+The RAW is kept so a better pipeline can be re-run later on a PC with
+tools/raw10_to_png2.py.
+"""
+import os
+import subprocess
+import sys
+import time
+
+import numpy as np
+
+W, H = 4224, 3136
+D = "/dev/media0"
+SUB = "/dev/v4l-subdev17"
+VID = "/dev/video0"
+FRAME = W * H * 10 // 8
+DEV = "/usr/local/lib/tablet-cam/develop.py"
+
+EXP_MAX, EXP_MIN = 3206, 4
+AG_MAX, AG_MIN = 8191, 128
+DG = 1024
+
+
+def sh(*args):
+    return subprocess.run(args, capture_output=True, text=True)
+
+
+def setup():
+    sh("modprobe", "ov13855")
+    sh("media-ctl", "-d", D, "-l", '"msm_csiphy0":1->"msm_csid0":0[1]')
+    sh("media-ctl", "-d", D, "-l", '"msm_csid0":1->"msm_vfe0_rdi0":0[1]')
+    for e in ('"ov13855 3-0036":0', '"msm_csiphy0":0', '"msm_csiphy0":1',
+              '"msm_csid0":0', '"msm_csid0":1', '"msm_vfe0_rdi0":0'):
+        sh("media-ctl", "-d", D, "-V", f"{e}[fmt:SGRBG10_1X10/4224x3136]")
+    sh("v4l2-ctl", "-d", SUB, "--set-ctrl=test_pattern=0")
+
+
+def set_exposure(exp, gain):
+    sh("v4l2-ctl", "-d", SUB,
+       f"--set-ctrl=exposure={int(exp)},analogue_gain={int(gain)},digital_gain={DG}")
+
+
+def capture(path):
+    if os.path.exists(path):
+        os.unlink(path)
+    sh("timeout", "25", "v4l2-ctl", "-d", VID,
+       "--set-fmt-video=width=%d,height=%d,pixelformat=pgAA" % (W, H),
+       "--stream-mmap", "--stream-count=1", "--stream-to=" + path)
+    return os.path.exists(path) and os.path.getsize(path) == FRAME
+
+
+def mean_level(path):
+    """Mean of a subsample of the 10-bit values (unpack 5B -> 4 samples)."""
+    buf = np.fromfile(path, dtype=np.uint8)
+    groups = buf[: (buf.size // 5) * 5].reshape(-1, 5)[::97]     # subsample
+    hi = groups[:, :4].astype(np.uint16) << 2
+    lo = ((groups[:, 4:5] >> np.array([0, 2, 4, 6], dtype=np.uint8)) & 3).astype(np.uint16)
+    vals = (hi | lo).ravel()
+    return float(vals.mean())
+
+
+def develop(raw_path, png_path):
+    """Turn the RAW10 frame into a viewable PNG on this device."""
+    if not os.path.exists(DEV):
+        print(f"develop: {DEV} 缺失，跳过")
+        return None
+    ev = 0.0
+    t0 = time.time()
+    r = subprocess.run([sys.executable, DEV, raw_path, png_path,
+                        "--bin2", "--exposure-ev", str(ev)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print("develop 失败:", (r.stderr or r.stdout).strip()[:200])
+        return None
+    print(f"develop: {png_path} ({os.path.getsize(png_path)} B, {time.time()-t0:.1f}s)")
+    return png_path
+
+
+def main():
+    out = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "/tmp/photo.raw"
+    target, iters = 450.0, 5
+    do_develop = "--no-develop" not in sys.argv
+    for i, a in enumerate(sys.argv):
+        if a == "--target":
+            target = float(sys.argv[i + 1])
+        if a == "--iters":
+            iters = int(sys.argv[i + 1])
+
+    setup()
+    exp, gain = 1200, 1024
+    best = None
+    for k in range(iters):
+        set_exposure(exp, gain)
+        time.sleep(0.3)
+        tmp = f"/tmp/.ae_{k}.raw"
+        if not capture(tmp):
+            print(f"iteration {k}: capture failed (reboot if the VFE is wedged)")
+            return 2
+        level = mean_level(tmp)
+        err = target - level
+        print(f"iter {k}: exp={exp:5d} gain={gain:5d} -> level {level:6.1f} (target {target:.0f})")
+        if best is None or abs(err) < best[0]:
+            best = (abs(err), tmp, exp, gain, level)
+        if abs(err) <= 25:
+            break
+        # exposure is linear-ish in time; gain roughly linear in code
+        if level < 4:                       # saturated dark: push harder
+            gain = min(AG_MAX, max(gain * 4, 256))
+        elif err > 0:
+            if exp < EXP_MAX:
+                exp = min(EXP_MAX, max(EXP_MIN, int(exp * target / max(level, 1))))
+            else:
+                gain = min(AG_MAX, max(AG_MIN, int(gain * target / max(level, 1))))
+        else:
+            if exp > EXP_MIN and level > target * 2:
+                exp = max(EXP_MIN, int(exp * target / level))
+            else:
+                gain = max(AG_MIN, int(gain * target / max(level, 1)))
+
+    _, tmp, exp, gain, level = best
+    os.replace(tmp, out)
+    set_exposure(exp, gain)
+    print(f"best: exp={exp} gain={gain} level={level:.1f} -> {out} ({os.path.getsize(out)} bytes)")
+
+    if do_develop:
+        png = os.path.splitext(out)[0] + ".png"
+        develop(out, png)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

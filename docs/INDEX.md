@@ -33,7 +33,7 @@
 
 - **显示**：fbdev + 自编旋转驱动，**1920×1200 横屏**（面板 1200×1920 软件旋转，重启自动恢复）
 - **触摸**：libinput Calibration Matrix `0 -1 1 1 0 0`（udev 持久化，重启后 default 即为该值）
-- **网络**：WiFi 192.168.1.100；USB hub 有线 eth0 192.168.1.101（救命通道）
+- **网络**：WiFi 192.168.1.100；USB hub 有线 eth0 192.168.1.4（救命通道）
 - **modem**：QMI 可用、LTE 射频可注册（-63 dBm），但固件会崩并带崩 WiFi → 目前保持 shutting-down，ModemManager/modem-online 已禁用
 - **GPU**：未初始化（原状）；nozap 刷机尝试失败已 fastboot 回滚，不再碰 boot 分区
 - **已停服务**：`tablet-autorotate`、`tablet-touch-rotate`、`ModemManager`、`modem-online`

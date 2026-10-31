@@ -103,16 +103,21 @@ sudo reboot
 | 文件 | 用途 |
 |---|---|
 | `twrp-3.7.0_9-0-clover-mipad4.img` | TWRP 3.7.0 recovery（60 MB，`fastboot boot` 即可临时启动） |
-| `clover-restore-*.zip` | **完整恢复包**：boot.img + rootfs，TWRP 里 Install 直接刷完 |
+| `clover-restore-*.z01` + `*.zip` | **完整恢复包分卷**（1500 MB + 1224 MB，GitHub 单附件上限 2 GiB 故分卷） |
 | `*.sha256` | 校验文件 |
+
+**分卷合并**（下载 .z01 和 .zip 到同一目录后）：
+
+```sh
+zip -s 0 clover-restore-20261031.zip --out full.zip   # 自动合并
+sha256sum -c clover-restore-20261031.sha256
+# 合并后的 full.zip 就是 TWRP 可刷的完整包
+```
 
 ```sh
 # 推荐顺序：fastboot 刷内核（小、稳）→ TWRP 刷整包
-fastboot flash boot boot.img          # 或从 zip 里取出
 fastboot boot twrp-3.7.0_9-0-clover-mipad4.img
-# TWRP: Install → clover-restore-*.zip → Reboot System
-
-# 一次性（不想分两步）：TWRP 里刷 zip 也会重刷 boot
+# TWRP: Install → full.zip → Reboot System
 ```
 
 > ⚠️ 镜像约 2.6 GB，**长时间传输容易中断**：

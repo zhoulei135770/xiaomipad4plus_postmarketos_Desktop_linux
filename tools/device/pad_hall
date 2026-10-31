@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""pad_hall.py - read the Hall effect sensor (ROHM BU52061NVX).
+
+The cover switch is exposed through the smgr prox driver (patch 0076) as an
+IIO device named "qcom-smgr-hall" with a binary proximity channel:
+    1 = magnet present (cover closed / lid shut)
+    0 = open
+
+Unlike the other smgr sensors this one does not stream continuously; the sensor
+manager delivers a sample when the buffer is enabled and then on each change.
+So one record is read per invocation.
+
+    sudo pad_hall.py           # one sample
+    sudo pad_hall.py watch     # re-arm and print whenever the state changes
+"""
+import os
+import select
+import struct
+import sys
+import time
+
+IIO = "/sys/bus/iio/devices"
+NAME = "qcom-smgr-hall"
+REC = 16          # u32 value at offset 0, s64 timestamp at offset 8
+
+
+def find():
+    for d in sorted(os.listdir(IIO)):
+        p = os.path.join(IIO, d)
+        try:
+            with open(os.path.join(p, "name")) as f:
+                if f.read().strip() == NAME:
+                    return p, d
+        except OSError:
+            continue
+    return None, None
+
+
+def write(path, val):
+    with open(path, "w") as f:
+        f.write(str(val))
+
+
+def arm(path):
+    se = os.path.join(path, "scan_elements")
+    write(os.path.join(se, "in_proximity_en"), 1)
+    write(os.path.join(se, "in_timestamp_en"), 1)
+    write(os.path.join(path, "buffer", "length"), 8)
+    write(os.path.join(path, "buffer", "enable"), 1)
+
+
+def disarm(path):
+    se = os.path.join(path, "scan_elements")
+    write(os.path.join(path, "buffer", "enable"), 0)
+    write(os.path.join(se, "in_proximity_en"), 0)
+    write(os.path.join(se, "in_timestamp_en"), 0)
+
+
+def one_sample(path, dev, timeout=3.0):
+    try:
+        disarm(path)
+    except OSError:
+        pass
+    time.sleep(0.2)
+    arm(path)
+    time.sleep(0.3)
+
+    fd = os.open(f"/dev/{dev}", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            return None
+        data = os.read(fd, REC)
+        if len(data) < REC:
+            return None
+        val, = struct.unpack_from("<I", data, 0)
+        ts, = struct.unpack_from("<q", data, 8)
+        return val, ts
+    finally:
+        os.close(fd)
+        try:
+            disarm(path)
+        except OSError:
+            pass
+
+
+def main():
+    watch = len(sys.argv) > 1 and sys.argv[1] == "watch"
+    path, dev = find()
+    if not path:
+        print(f"{NAME} not found (is patch 0076 applied?)")
+        return 1
+
+    sample = one_sample(path, dev)
+    if sample is None:
+        print("no sample from the hall sensor")
+        return 1
+    val, ts = sample
+    print(f"hall_raw={val} -> {'CLOSED (magnet)' if val else 'open'}  ts={ts}")
+
+    if not watch:
+        return 0
+
+    last = val
+    print("watching for changes (Ctrl-C to stop)...")
+    try:
+        while True:
+            s = one_sample(path, dev)
+            if s and s[0] != last:
+                last = s[0]
+                print(f"  -> {'CLOSED (magnet)' if last else 'open'}  ts={s[1]}")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

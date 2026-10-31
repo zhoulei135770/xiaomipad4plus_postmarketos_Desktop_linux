@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconnect WiFi and Bluetooth after boot/resume
+After=NetworkManager.service bluetooth.service multi-user.target
+Wants=NetworkManager.service bluetooth.service
+
+[Service]
+Type=oneshot
+# small settle delay so NM/supplicant have published their state
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/tablet-reconnect
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

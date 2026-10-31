@@ -1,0 +1,35 @@
+#!/bin/sh
+# Trigger an immediate capture and dump the resulting image plus simple pixel
+# statistics, so we can tell a real fingerprint (sensor data) from a blank or
+# all-zero frame.
+D=/sys/bus/spi/devices/spi0.0
+OUT=/tmp/fpimg.bin
+
+dmesg -c >/dev/null 2>&1
+echo 1 > "$D/capture_now" 2>/dev/null
+sleep 2
+
+# sysfs reads are one page at a time; loop with dd until nothing is left
+: > "$OUT"
+off=0
+while :; do
+	dd if="$D/image" of=/tmp/fpchunk.bin bs=1 skip=$off count=4096 \
+		2>/dev/null
+	sz=$(wc -c < /tmp/fpchunk.bin 2>/dev/null)
+	[ -z "$sz" ] && break
+	[ "$sz" -eq 0 ] && break
+	cat /tmp/fpchunk.bin >> "$OUT"
+	off=$((off + sz))
+	[ "$off" -ge 12000 ] && break
+done
+
+{
+	echo "=== dmesg ==="
+	dmesg | grep -E "capture_now|captured|status" | tail -4
+	echo "=== image size ==="
+	wc -c < "$OUT"
+	echo "=== statistics (header/trailer) ==="
+	od -An -tu1 -N 48 "$OUT" 2>/dev/null
+	echo "..."
+	tail -c 48 "$OUT" 2>/dev/null | od -An -tu1
+} > /tmp/fpimg.log 2>&1

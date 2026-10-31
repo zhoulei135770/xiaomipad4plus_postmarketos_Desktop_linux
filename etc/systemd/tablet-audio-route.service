@@ -1,0 +1,12 @@
+[Unit]
+Description=Tablet audio routing (primary MI2S -> TAS2557 amplifiers)
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tablet-audio-route
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

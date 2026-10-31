@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the tablet panel from auto-blanking
+After=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tablet-no-blank
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

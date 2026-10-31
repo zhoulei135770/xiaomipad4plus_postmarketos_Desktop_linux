@@ -1,0 +1,19 @@
+#!/bin/sh
+# Create a restorable rootfs archive of the running pmOS system.
+#
+# Uses zstd -T0 (8 cores here) so 5 GB of filesystem packs in a few minutes.
+# Excludes pseudo filesystems and caches; keeps /etc, /usr, /var/lib, /home.
+OUT=${1:-/tmp/pmos-rootfs.tar.zst}
+
+exec tar --one-file-system \
+	--exclude=./proc --exclude=./sys --exclude=./dev --exclude=./tmp \
+	--exclude=./run --exclude=./var/cache/apk --exclude=./var/log/journal \
+	--exclude=./lost+found \
+	-cf - -C / . 2>/tmp/tar-errors.txt \
+	| zstd -T0 -3 -o "$OUT" -f 2>/tmp/zstd-errors.txt
+
+echo "exit=$?"
+ls -l "$OUT" 2>/dev/null
+md5sum "$OUT" 2>/dev/null
+echo "--- tar warnings (first 5) ---"
+head -5 /tmp/tar-errors.txt 2>/dev/null

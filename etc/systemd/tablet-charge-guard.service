@@ -1,0 +1,13 @@
+[Unit]
+Description=Temperature-aware USB input current guard (forced fast charge)
+After=multi-user.target
+ConditionPathExists=/sys/class/power_supply/pm660-charger/current_max
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tablet-charge-guard
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

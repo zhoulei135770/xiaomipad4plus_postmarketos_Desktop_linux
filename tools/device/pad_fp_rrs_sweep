@@ -1,0 +1,66 @@
+#!/bin/sh
+# Try SAMPLE_PX_DLY candidates derived from the vendor RRS record for
+# hwid 0x0341:   0f 0b ffffffff 0f 26 37 cd ef 26 37 cd ef 1a
+#
+# The repeating 26 37 cd ef pair may be the 8-byte SAMPLE_PX_DLY value, and the
+# leading 0f / 0b already match PXL_RST_DLY and IMAGE_SETUP.  skip_config=1 so
+# the driver writes nothing and these values survive into the capture.
+#
+# Put a finger on the sensor before running; it stays there for the whole sweep.
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+w() { printf 'w %s\n' "$*" > "$D/cmd"; sleep 0.03; }
+
+grab() { # label
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 1
+	dd if=$D/image of=/tmp/r.bin bs=1 count=36865 2>/dev/null
+	python3 - "$1" <<'EOF'
+import sys
+d = open('/tmp/r.bin', 'rb').read()
+if len(d) < 100:
+    print(f"  {sys.argv[1]:<40} no data"); raise SystemExit
+d = d[1:]
+m = sum(d) / len(d); sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+mark = "  <== RIDGES" if sd > 10 else ""
+print(f"  {sys.argv[1]:<40} mean {m:6.1f} sd {sd:6.2f} uniq {len(set(d)):3d}{mark}")
+EOF
+}
+
+apply() { # sample_px_dly as 8 hex bytes, in the order they appear in the RRS record
+	w 6c 0f
+	w 8c 02
+	w a0 01 01
+	w a8 0f 0b
+	w 5c 0b
+	w d8 50
+	w dc 05 00
+	w 54 01 90 00 00
+	w 90 18
+	w 68 "$@"
+}
+
+echo "=== finger must be resting on the sensor now ==="
+echo 1 > "$P/skip_config"
+echo 0x9001 > "$P/img_capt_size"
+echo 36865 > "$P/read_len"
+
+# reference (rev 3) for comparison
+apply 23 23 23 23 17 17 17 17
+grab "rev3 reference 1717171723232323"
+
+# RRS-derived candidates, bytes exactly as they appear in the record
+apply 26 37 cd ef 26 37 cd ef
+grab "RRS order  2637cdef2637cdef"
+apply ef cd 37 26 ef cd 37 26
+grab "RRS rev    efcd3726efcd3726"
+apply 1a 0f 26 37 cd ef 26 37
+grab "RRS tail   1a0f2637cdef2637"
+apply 0f 26 37 cd ef 26 37 cd
+grab "RRS mid    0f2637cdef2637cd"
+
+echo "=== restore ==="
+echo 0 > "$P/skip_config"
+apply 23 23 23 23 17 17 17 17
+echo done

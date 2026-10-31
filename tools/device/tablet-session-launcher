@@ -1,0 +1,88 @@
+#!/bin/sh
+# Start the tablet desktop.  Desktop choice lives in /etc/tablet/desktop
+# ("lxqt" or "xfce").  If LXQt fails to bring up a panel within 45 s we fall
+# back to XFCE automatically, so the tablet always ends up usable.
+LOGDIR="$HOME/.local/share/tablet-session"
+mkdir -p "$LOGDIR" 2>/dev/null
+LOG="$LOGDIR/launcher.log"
+if ! { : >>"$LOG"; } 2>/dev/null; then LOG=/dev/null; fi
+log() { echo "[$(date '+%H:%M:%S')] $*" >>"$LOG" 2>/dev/null; }
+
+live_pid() {
+    for p in $(pgrep -x "$1" 2>/dev/null); do
+        st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+        if [ "$st" != "Z" ] && [ -n "$st" ]; then echo "$p"; return 0; fi
+    done
+    return 1
+}
+
+wait_end() {   # wait_end <pid>
+    while kill -0 "$1" 2>/dev/null; do sleep 2; done
+}
+
+log "=== launcher start ==="
+
+if [ -e /etc/tablet/force-phosh ]; then
+    log "force-phosh flag present -> Phosh"
+    exec /usr/libexec/phrog-greetd-session
+fi
+
+DE=$(cat /etc/tablet/desktop 2>/dev/null || echo xfce)
+log "requested desktop: $DE"
+
+if [ "$DE" = "lxqt" ] && [ -x /usr/local/bin/lxqt-x-session ]; then
+    /usr/local/bin/lxqt-x-session &
+    XPID=$!
+    log "lxqt wrapper pid=$XPID"
+    i=0
+    up=0
+    while [ $i -lt 45 ]; do
+        if live_pid lxqt-panel >/dev/null 2>&1 || live_pid openbox >/dev/null 2>&1; then
+            log "LXQt is up at ${i}s"
+            up=1
+            break
+        fi
+        kill -0 "$XPID" 2>/dev/null || { log "lxqt wrapper exited early"; break; }
+        i=$((i+1)); sleep 1
+    done
+    if [ $up -eq 1 ]; then
+        wait_end "$XPID"
+        log "LXQt ended"
+        exit 0
+    fi
+    log "LXQt did not come up -> falling back to XFCE"
+    kill "$XPID" 2>/dev/null
+    pkill -x lxqt-session 2>/dev/null
+    pkill -x lxqt-panel 2>/dev/null
+    pkill -x openbox 2>/dev/null
+    pkill -x Xorg 2>/dev/null
+    sleep 3
+    rm -f /tmp/.X0-lock 2>/dev/null
+fi
+
+/usr/local/bin/xfce-x-session &
+XPID=$!
+log "xfce wrapper pid=$XPID"
+
+i=0
+UP=0
+while [ $i -lt 90 ]; do
+    if live_pid xfwm4 >/dev/null 2>&1; then
+        log "live xfwm4 detected at ${i}s"
+        UP=1
+        break
+    fi
+    i=$((i+1)); sleep 1
+done
+
+if [ $UP -eq 0 ]; then
+    log "XFCE never came up; handing over to Phosh"
+    pkill -x xfce-x-session 2>/dev/null
+    pkill -x Xorg 2>/dev/null
+    sleep 2
+    exec /usr/libexec/phrog-greetd-session
+fi
+
+log "XFCE is up; waiting for it to end"
+wait_end "$XPID"
+log "XFCE ended"

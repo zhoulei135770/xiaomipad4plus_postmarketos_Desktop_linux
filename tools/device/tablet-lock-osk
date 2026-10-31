@@ -1,0 +1,22 @@
+#!/bin/sh
+# tablet-lock-osk - show an on-screen keyboard while the screen is locked.
+#
+# The Mi Pad has no hardware keyboard, so gtklock would be impossible to unlock
+# by touch alone.  wvkbd is a wlroots layer-shell keyboard that types into the
+# focused surface (gtklock's password entry).
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+export HOME=${HOME:-/home/zhoulei}
+
+OKB=/usr/bin/wvkbd-mobintl
+
+while :; do
+	if pgrep -f "/usr/bin/gtklock" >/dev/null 2>&1; then
+		if ! pgrep -f "$OKB" >/dev/null 2>&1; then
+			"$OKB" -L 260 >/dev/null 2>&1 &
+		fi
+	else
+		pkill -f "$OKB" >/dev/null 2>&1
+	fi
+	sleep 2
+done

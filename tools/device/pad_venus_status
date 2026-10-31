@@ -1,0 +1,19 @@
+#!/bin/sh
+# Report the venus state: AXI clock rate, module load state, probe result.
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+echo "=== clocks ==="
+grep -E "video_axi_clk|throttle_video_axi|axi_clk_src|video_core_clk|video_ahb" \
+	/sys/kernel/debug/clk/clk_summary 2>/dev/null | head -8
+
+echo
+echo "=== modules ==="
+lsmod | grep venus
+
+echo
+echo "=== bound? ==="
+ls -d /sys/bus/platform/drivers/qcom-venus/cc00000.video-codec 2>/dev/null || echo "(not bound)"
+
+echo
+echo "=== dmesg ==="
+dmesg | grep -iE "venus|INIT_DONE|OPP" | tail -12

@@ -1,0 +1,52 @@
+#!/bin/sh
+# pad_usb_autoswitch.sh - keep the USB-C port in the right mode, using the
+# SMB2 charger's own USB-C CC (Configuration Channel) detection.
+#
+# The charger tracks the CC lines itself and exposes them through
+# TYPE_C_STATUS_1..4.  Measured on the Mi Pad 4 Plus:
+#
+#   charger attached : typec1=0x80 (UFP_TYPEC_RDSTD) typec4 vbus=1
+#   hub attached     : typec1=0x00                   typec2 & 0xf = 4
+#
+# CC detection does not depend on VBUS, so unlike the old probe scheme this
+# never has to interrupt power to find out what is plugged in.
+#
+#   Rd detected (typec1 bit7)  -> something sources us  -> charge, OTG off
+#   DFP bits  (typec2[3:0])    -> something sinks us    -> host,   OTG on
+#   neither                    -> nothing attached     -> charge, OTG off
+OTG=$(find /sys/devices -name otg_vbus 2>/dev/null | head -1)
+TC=$(find /sys/devices -name typec_status 2>/dev/null | head -1)
+[ -n "$OTG" ] || { echo "otg_vbus not found"; exit 1; }
+[ -n "$TC" ] || { echo "typec_status not found"; exit 1; }
+
+POLL=${POLL:-2}
+CC1=0
+CC2=0
+
+otg_on()  { [ "$(cat "$OTG")" = "1" ] || { echo on  > "$OTG"; echo "$(date +%H:%M:%S) -> host mode (device on CC)"; }; }
+otg_off() { [ "$(cat "$OTG")" = "0" ] || { echo off > "$OTG"; echo "$(date +%H:%M:%S) -> charge mode (source on CC)"; }; }
+
+# parse "typec1=0xNN ... typec2=0xNN ..." into CC1/CC2 integers
+read_cc() {
+	v1=$(sed -n 's/.*typec1=\(0x[0-9a-f]*\).*/\1/p' "$TC" 2>/dev/null | head -1)
+	v2=$(sed -n 's/.*typec2=\(0x[0-9a-f]*\).*/\1/p' "$TC" 2>/dev/null | head -1)
+	CC1=$(( ${v1:-0} ))
+	CC2=$(( ${v2:-0} ))
+}
+
+echo "usb autoswitch (CC based) started"
+while :; do
+	read_cc
+	rrd=$(( (CC1 & 0x80) != 0 ))      # a source (charger) is attached
+	rdfp=$(( (CC2 & 0x0f) != 0 ))     # a sink (device) is attached
+
+	if [ "$rrd" -eq 1 ]; then
+		otg_off
+	elif [ "$rdfp" -eq 1 ]; then
+		otg_on
+	else
+		# nothing attached: stay in charge mode, it is the safe default
+		otg_off
+	fi
+	sleep "$POLL"
+done

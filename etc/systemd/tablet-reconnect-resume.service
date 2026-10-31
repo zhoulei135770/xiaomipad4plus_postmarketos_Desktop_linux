@@ -1,0 +1,13 @@
+[Unit]
+Description=Reconnect WiFi and Bluetooth after resume
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+Wants=NetworkManager.service bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/bin/tablet-reconnect
+TimeoutStartSec=120
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

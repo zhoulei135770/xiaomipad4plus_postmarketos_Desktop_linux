@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Auto-rotate the tablet display from the raw IIO accelerometer.
+
+Reads /dev/iio:device2 (qcom-smgr-accel) directly (no iio-sensor-proxy).
+Applies the sensor mount matrix (0,-1,0; -1,0,0; 0,0,1) to get the
+device-frame acceleration, then sets the labwc/wlroots output transform.
+
+Auto-rotation can be disabled with `tablet-rotate lock` / enabled with
+`tablet-rotate auto` (flag file ~/.config/tablet/auto-rotate).
+"""
+import os
+import struct
+import subprocess
+import time
+
+DEV = "/dev/iio:device2"
+SYS = "/sys/bus/iio/devices/iio:device2"
+FLAG = "/home/zhoulei/.config/tablet/auto-rotate"
+RUNTIME = "/run/user/10000"
+WAYLAND = "wayland-0"
+OUTPUT = "DSI-1"
+
+THRESHOLD = 380000.0   # ~0.6 g (1 g is about 630000 raw)
+DOMINANCE = 1.3
+HYSTERESIS = 0.8       # seconds the new orientation must stay stable
+
+env = dict(os.environ, XDG_RUNTIME_DIR=RUNTIME, WAYLAND_DISPLAY=WAYLAND)
+
+
+def write(path, value):
+    with open(path, "w") as f:
+        f.write(value)
+
+
+def setup():
+    last = None
+    for _ in range(20):
+        try:
+            write(SYS + "/buffer/enable", "0")
+            time.sleep(0.05)
+            write(SYS + "/scan_elements/in_timestamp_en", "0")
+            write(SYS + "/buffer/length", "4")
+            write(SYS + "/buffer/enable", "1")
+            return
+        except OSError as exc:
+            last = exc
+            time.sleep(0.5)
+    raise SystemExit("cannot set up iio buffer: %s" % last)
+
+
+def auto_enabled():
+    try:
+        return open(FLAG).read().strip() != "off"
+    except Exception:
+        return True
+
+
+def set_transform(t):
+    try:
+        subprocess.run(
+            ["wlr-randr", "--output", OUTPUT, "--transform", str(t)],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        print("transform ->", t, flush=True)
+        try:
+            subprocess.run(["/usr/local/bin/tablet-touch-matrix", str(t)], timeout=5)
+        except Exception as exc:
+            print("touch-matrix failed:", exc, flush=True)
+    except Exception as exc:  # pragma: no cover
+        print("wlr-randr failed:", exc, flush=True)
+
+
+def smooth(prev, new, alpha=0.25):
+    if prev is None:
+        return new
+    return tuple(p + alpha * (n - p) for p, n in zip(prev, new))
+
+
+def main():
+    setup()
+    fd = os.open(DEV, os.O_RDONLY | os.O_NONBLOCK)
+    buf = b""
+    ema = None
+    current = None
+    candidate = None
+    cand_since = 0.0
+    was_auto = None
+
+    while True:
+        auto = auto_enabled()
+        if auto != was_auto:
+            print("auto-rotate", "on" if auto else "off", flush=True)
+            was_auto = auto
+
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            time.sleep(0.02)
+            continue
+        except OSError:
+            time.sleep(0.2)
+            continue
+        if not data:
+            time.sleep(0.02)
+            continue
+
+        buf += data
+        while len(buf) >= 12:
+            rx, ry, rz = struct.unpack("<iii", buf[:12])
+            buf = buf[12:]
+            ema = smooth(ema, (rx, ry, rz))
+            if not auto:
+                candidate = None
+                continue
+            # mount matrix: X = -ry, Y = -rx, Z = rz
+            x = -ema[1]
+            y = -ema[0]
+            z = ema[2]
+            ax, ay, az = abs(x), abs(y), abs(z)
+
+            desired = None
+            if ax > THRESHOLD and ax > ay * DOMINANCE and ax > az * DOMINANCE:
+                desired = 90 if x > 0 else 270
+            elif ay > THRESHOLD and ay > ax * DOMINANCE and ay > az * DOMINANCE:
+                desired = "normal" if y < 0 else 180
+
+            if desired is None or desired == current:
+                candidate = None
+                continue
+            if desired != candidate:
+                candidate = desired
+                cand_since = time.monotonic()
+                continue
+            if time.monotonic() - cand_since >= HYSTERESIS:
+                set_transform(desired)
+                current = desired
+                candidate = None
+
+
+if __name__ == "__main__":
+    main()

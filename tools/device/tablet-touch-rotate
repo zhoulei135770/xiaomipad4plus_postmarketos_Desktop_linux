@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""tablet-touch-rotate -- keep the Goodix touchscreen aligned with the screen.
+
+THE BUG THIS FIXES
+------------------
+The X screen can be rotated at runtime (xrandr --rotate normal/left/right/
+inverted) but the touchscreen's "Coordinate Transformation Matrix" is an
+independent X input property.  Nothing links the two, so:
+
+  * after a rotation the matrix is stale -> taps land somewhere else,
+  * xfce4-settings / xfsettingsd resets the matrix at login,
+  * tablet-display-mode / the session script set it once and then forget,
+
+which is exactly the "finger is here, cursor is there" symptom.
+
+This daemon polls the ACTUAL RandR rotation of the connected output and
+re-applies the matching matrix whenever it changes (or whenever something
+else overwrites it).  Polling is deliberate: RandR property changes are not
+observable through a stable, dependency-free API from a shell, and one
+`xrandr --query` per second costs well under 1 ms.
+
+MATRICES (libinput / X server convention)
+-----------------------------------------
+The matrix maps normalised device coordinates into normalised screen
+coordinates.  Rotating the *content* by theta requires rotating the *device*
+by -theta, which is why the values look "opposite" to the xrandr verb:
+
+    xrandr --rotate normal     identity
+    xrandr --rotate left       content 90 deg CCW
+    xrandr --rotate right      content 90 deg CW
+    xrandr --rotate inverted   180 deg
+
+Verified against the libinput documentation's canonical rotation matrices
+("90 degree clockwise" == [0 -1 1; 1 0 0]).
+
+USAGE
+    tablet-touch-rotate            # run as a daemon (systemd unit does this)
+    tablet-touch-rotate --once     # apply once and exit
+    tablet-touch-rotate --status   # print current rotation + matrix
+    tablet-touch-rotate --flip     # swap left/right signs (hardware that is
+                                   # mounted mirrored); persists in /etc/tablet
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+CONF = "/etc/tablet/touch.json"
+POLL = 1.0
+
+BASE = {
+    "normal":   [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "left":     [0, -1, 1, 1, 0, 0, 0, 0, 1],
+    "right":    [0, 1, 0, -1, 0, 1, 0, 0, 1],
+    "inverted": [-1, 0, 1, 0, -1, 1, 0, 0, 1],
+}
+
+DEBUG = False
+
+
+def log(msg: str) -> None:
+    if DEBUG:
+        print(f"[touch] {msg}", flush=True)
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("XAUTHORITY", os.path.expanduser("~/.Xauthority"))
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def load_conf() -> dict:
+    try:
+        with open(CONF) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("flip", False)
+    d.setdefault("disabled", False)
+    return d
+
+
+def save_conf(d: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        tmp = CONF + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(d, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, CONF)
+    except OSError as exc:
+        log(f"cannot save {CONF}: {exc}")
+
+
+def matrix_for(rot: str, flip: bool) -> list[int] | None:
+    m = BASE.get(rot)
+    if m is None:
+        return None
+    if not flip:
+        return m
+    # Swap the rotation direction (mirror the device).  A reflection about the
+    # vertical axis composed with the rotation is the cheapest correct fix.
+    return [-m[0], -m[1], m[2], -m[3], -m[4], m[5], 0, 0, 1]
+
+
+def output_and_rotation() -> tuple[str | None, str | None]:
+    """Parse `xrandr --query` for the first connected output and its active
+    rotation.
+
+    A connected line looks like:
+        DSI-1 connected 1200x1920+0+0 (normal left inverted right x axis y axis)
+        DSI-1 connected 1920x1200+0+0 left (normal left inverted right ...)
+    Field 3 is the geometry; field 4 is the ACTIVE rotation, and it is absent
+    when the output is in its normal orientation.  The parenthesised list that
+    follows is the set of SUPPORTED rotations - never read that.
+    """
+    r = run(["xrandr", "--query"])
+    if r.returncode != 0:
+        return None, None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[1] != "connected":
+            continue
+        name = parts[0]
+        geom = parts[2]
+        if "x" not in geom or "+" not in geom:
+            return name, "normal"
+        rest = parts[3:]
+        rot = "normal"
+        if rest:
+            cand = rest[0].strip("()")
+            if cand in BASE:
+                rot = cand
+        return name, rot
+    return None, None
+
+
+def touch_devices() -> list[str]:
+    """XInput IDs of the Goodix touchscreen POINTER nodes (the keyboard node
+    that the same device registers must be skipped)."""
+    r = run(["xinput", "list", "--short"])
+    ids = []
+    for line in r.stdout.splitlines():
+        low = line.lower()
+        if "goodix" not in low or "keyboard" in low:
+            continue
+        if "id=" not in line:
+            continue
+        ids.append(line.split("id=")[1].split()[0].strip())
+    return ids
+
+
+def current_matrix(dev: str) -> str | None:
+    """Read the property back.  xinput prints it comma separated:
+    "0.000000, -1.000000, 1.000000, 1.000000, 0.000000, ..." so the commas
+    must be stripped before comparing, otherwise every poll looks like a
+    change and we rewrite the property once per second."""
+    r = run(["xinput", "list-props", dev])
+    for line in r.stdout.splitlines():
+        if "Coordinate Transformation Matrix" in line and "Default" not in line:
+            raw = line.split(":", 1)[1].replace(",", " ")
+            return " ".join(raw.split())
+    return None
+
+
+def apply_matrix(dev: str, m: list[int]) -> bool:
+    want = " ".join(f"{v:g}" for v in m)
+    have = current_matrix(dev)
+    if have is not None:
+        try:
+            if [float(x) for x in have.split()] == [float(x) for x in want.split()]:
+                return False
+        except ValueError:
+            pass
+    r = run(["xinput", "set-prop", dev, "Coordinate Transformation Matrix"] + want.split())
+    if r.returncode != 0:
+        log(f"set-prop {dev} failed: {r.stderr.strip()}")
+        return False
+    log(f"dev {dev} -> {want}")
+    return True
+
+
+def sync(conf: dict, verbose: bool = False) -> tuple[str | None, str | None]:
+    _, rot = output_and_rotation()
+    if rot is None:
+        return None, None
+    m = matrix_for(rot, conf.get("flip", False))
+    if m is None:
+        return None, rot
+    for dev in touch_devices():
+        changed = apply_matrix(dev, m)
+        if verbose and not changed:
+            print(f"{dev}: {current_matrix(dev)} (unchanged)")
+    return m, rot
+
+
+def main() -> int:
+    global DEBUG
+    args = sys.argv[1:]
+    DEBUG = "--verbose" in args
+
+    conf = load_conf()
+
+    if "--status" in args:
+        m, rot = sync(conf, verbose=True)
+        out, rot2 = output_and_rotation()
+        print(f"output    : {out}")
+        print(f"rotation  : {rot2}")
+        print(f"flip      : {conf.get('flip')}")
+        print(f"matrix    : {' '.join(map(str, m)) if m else 'n/a'}")
+        for dev in touch_devices():
+            print(f"device {dev}: {current_matrix(dev)}")
+        return 0
+
+    if "--flip" in args:
+        conf["flip"] = not conf.get("flip", False)
+        save_conf(conf)
+        m, rot = sync(conf)
+        print(f"flip -> {conf['flip']}  rotation={rot}  matrix={m}")
+        return 0
+
+    if "--once" in args:
+        m, rot = sync(conf, verbose=True)
+        print(f"rotation={rot} matrix={m}")
+        return 0
+
+    # ---- daemon -----------------------------------------------------------
+    log("started")
+    last_rot = None
+    while True:
+        try:
+            conf = load_conf()
+            if conf.get("disabled"):
+                time.sleep(POLL)
+                continue
+            m, rot = sync(conf)
+            if rot is not None and rot != last_rot:
+                log(f"rotation {last_rot} -> {rot}")
+                last_rot = rot
+        except Exception as exc:  # never die on a transient X hiccup
+            log(f"loop error: {exc}")
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

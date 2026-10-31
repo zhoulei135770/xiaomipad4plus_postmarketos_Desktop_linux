@@ -1,0 +1,35 @@
+#!/bin/sh
+# Try different IMG_CAPT_SIZE row counts and report how many rows of the frame
+# carry real data (the sensor fills the remainder with an alternating 0xBD/0xC0
+# pattern when fewer rows were captured).
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+report() {
+	python3 - "$1" "$2" <<'EOF'
+import sys
+d = open('/tmp/rows.bin', 'rb').read()[2:]
+W = 176
+rows = len(d) // W
+real = 0
+first_bad = None
+for y in range(rows):
+    row = d[y*W:(y+1)*W]
+    if len(set(row)) > 2:
+        real += 1
+    elif first_bad is None:
+        first_bad = y
+print(f"  size={sys.argv[1]:<12} real rows {real:2d}/{rows}  "
+      f"first filler row {first_bad}  min {min(d)} max {max(d)}")
+EOF
+}
+
+for size in 0xB0000800 0xB0001000 0xB0002000 0xB0004000; do
+	echo "$size" > "$P/img_capt_size"
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 1
+	dd if="$D/image" of=/tmp/rows.bin bs=1 count=11266 2>/dev/null
+	report "$size"
+done
+
+echo 0xB0000800 > "$P/img_capt_size"

@@ -1,0 +1,42 @@
+#!/bin/sh
+# Decode a short H.264 clip with the venus hardware decoder (ffmpeg v4l2m2m)
+# and report whether real pixel data came out.
+T=/tmp/venus_test
+mkdir -p "$T"
+
+echo "=== decoder device ==="
+ls -l /dev/video7 2>/dev/null || { echo "no /dev/video7"; exit 1; }
+
+if [ ! -f "$T/in.h264" ]; then
+	echo "=== generating test clip ==="
+	ffmpeg -hide_banner -loglevel error -f lavfi \
+		-i testsrc=size=320x240:rate=15:duration=2 \
+		-c:v libx264 -pix_fmt yuv420p -profile:v baseline -level 3.0 \
+		-f h264 "$T/in.h264" || { echo "encode failed"; exit 1; }
+fi
+echo "input: $(wc -c < "$T/in.h264") bytes"
+
+echo "=== decoding with h264_v4l2m2m (venus) ==="
+rm -f "$T/out.yuv"
+ffmpeg -hide_banner -loglevel error \
+	-c:v h264_v4l2m2m -i "$T/in.h264" -f rawvideo -pix_fmt yuv420p "$T/out.yuv" 2>&1 | tail -6
+
+if [ -s "$T/out.yuv" ]; then
+	echo "output: $(wc -c < "$T/out.yuv") bytes"
+	python3 - "$T/out.yuv" <<'EOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+if not d:
+    print("  EMPTY"); raise SystemExit
+sub = d[:320*240]
+print("  first frame: %d bytes, distinct %d, min %d max %d"
+      % (len(sub), len(set(sub)), min(sub), max(sub)))
+print("  ==> venus produced REAL pixel data" if len(set(sub)) > 50
+      else "  ==> suspiciously flat")
+EOF
+else
+	echo "!! no output produced"
+fi
+
+echo "=== dmesg ==="
+dmesg | grep -iE "venus|v4l2|firmware|INIT" | tail -8

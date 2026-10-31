@@ -1,0 +1,17 @@
+#!/bin/sh
+# Toggle the on-screen keyboard (for when auto-show doesn't trigger).
+export DISPLAY=${DISPLAY:-:0}
+export XAUTHORITY=${XAUTHORITY:-/home/zhoulei/.Xauthority}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+
+if pgrep -f "onboard" >/dev/null 2>&1; then
+	# try the D-Bus toggle first, else just stop it
+	if command -v gdbus >/dev/null 2>&1; then
+		gdbus call --session --dest org.onboard.Onboard \
+			--object-path /org/onboard/Onboard/Keyboard \
+			--method org.onboard.Onboard.Keyboard.ToggleVisible >/dev/null 2>&1 && exit 0
+	fi
+	pkill -f onboard
+else
+	nohup setsid onboard --layout=Compact >/dev/null 2>&1 < /dev/null &
+fi

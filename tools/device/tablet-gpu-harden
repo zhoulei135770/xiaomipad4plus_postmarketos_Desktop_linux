@@ -1,0 +1,13 @@
+#!/bin/sh
+# Adreno 512 / downstream msm: apply the stability knobs that modprobe.d
+# cannot reach (msm is built into the kernel), and keep the GPU powered.
+P=/sys/module/msm/parameters
+[ -w "$P/enable_preemption" ] && echo 0 > "$P/enable_preemption"
+[ -w "$P/enable_eviction" ] && echo 0 > "$P/enable_eviction"
+for d in /sys/bus/platform/devices/5000000.gpu /sys/devices/platform/soc@0/5000000.gpu; do
+	[ -w "$d/power/control" ] && echo on > "$d/power/control"
+done
+# cap the GPU to a stable OPP (370 MHz) unless gpu-cap-freq already did
+f=/sys/class/devfreq/5000000.gpu/max_freq
+[ -w "$f" ] && [ "$(cat /sys/class/devfreq/5000000.gpu/cur_freq 2>/dev/null)" != "" ] && echo 370000000 > "$f" 2>/dev/null
+exit 0

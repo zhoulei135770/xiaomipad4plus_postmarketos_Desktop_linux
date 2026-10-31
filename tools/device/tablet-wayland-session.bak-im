@@ -1,0 +1,7 @@
+#!/bin/sh
+# LXQt Wayland session for the tablet (labwc + GPU rotation)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export XDG_SESSION_TYPE=wayland
+export QT_QPA_PLATFORM=wayland
+export GDK_BACKEND=wayland,x11
+exec /usr/bin/startlxqtwayland

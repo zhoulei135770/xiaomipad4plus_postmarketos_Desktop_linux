@@ -1,0 +1,23 @@
+#!/bin/sh
+# Repeatedly trigger an immediate capture (no finger-down wait) and summarise
+# what came back.  capture_now bypasses the FPC1020 finger-detect path, which
+# does not work on this module, so a press during the loop still gets captured.
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-30}
+
+dmesg -c >/dev/null 2>&1
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 2
+	i=$((i + 1))
+done
+
+{
+	echo "=== capture_now results ($N runs) ==="
+	dmesg | grep -E "capture_now|captured|status after" | tail -40
+	echo "=== registers after ==="
+	for r in 1c 38 14 24; do echo "r $r 1" > "$D/cmd"; sleep 0.2; done
+	sleep 1
+	dmesg | grep -E "reg 0x" | sed "s/.*spi0.0: //" | tail -8
+} > /tmp/fploop.log 2>&1

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Switch the tablet between portrait (GPU) and landscape (software) profiles.
+#
+#   tablet-display-mode              -> show current
+#   tablet-display-mode portrait     -> 1200x1920, glamor, fast + low CPU
+#   tablet-display-mode landscape    -> 1920x1200, llvmpipe, slower, GPU-safe
+#
+# Landscape needs software acceleration because msm has no rotate-90 and the
+# glamor path hard-hangs the GPU.
+set -u
+SOFT=/etc/X11/xorg.conf.d/50-msm-soft.conf
+OFF=/etc/X11/xorg.conf.d/50-msm-soft.conf.off
+FLAG=/etc/tablet/landscape
+
+case "${1:-show}" in
+  show)
+    if [ -e "$FLAG" ]; then echo "current: landscape (1920x1200, llvmpipe)";
+    else echo "current: portrait (1200x1920, glamor/FD512)"; fi
+    [ -f "$SOFT" ] && echo "  soft-accel config: ENABLED" || echo "  soft-accel config: disabled"
+    ;;
+  landscape)
+    mkdir -p /etc/tablet
+    touch "$FLAG"
+    [ -f "$OFF" ] && mv -f "$OFF" "$SOFT"
+    echo "switched to landscape; restarting session..."
+    systemctl restart greetd
+    ;;
+  portrait)
+    rm -f "$FLAG"
+    [ -f "$SOFT" ] && mv -f "$SOFT" "$OFF"
+    echo "switched to portrait; restarting session..."
+    systemctl restart greetd
+    ;;
+  *)
+    echo "usage: $0 [show|portrait|landscape]"; exit 2 ;;
+esac

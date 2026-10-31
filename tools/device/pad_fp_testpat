@@ -1,0 +1,45 @@
+#!/bin/sh
+# Enable the sensor's internal test pattern and check whether the read path
+# returns a structured image.  A working read path shows high variance; a broken
+# one stays flat.
+#
+# Uses the vendor capture geometry (IMG_CAPT_SIZE 0x00B00800 = 64x176 rows/cols,
+# 11266-byte frame) recovered from the trustlet.
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+try() { # pattern label
+	echo "$1" > "$P/test_pattern"
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 1
+	dd if="$D/image" of=/tmp/t.bin bs=1 count=11266 2>/dev/null
+	python3 - "$2" <<'EOF'
+import sys
+d = open('/tmp/t.bin', 'rb').read()
+if len(d) < 100:
+    print(f"  {sys.argv[1]:<20} no data"); raise SystemExit
+d = d[2:]
+m = sum(d) / len(d)
+sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+u = len(set(d))
+mark = "  <== PATTERN!" if sd > 10 else ""
+print(f"  {sys.argv[1]:<20} min {min(d):3d} max {max(d):3d} mean {m:6.1f} "
+      f"sd {sd:6.2f} uniq {u:3d}{mark}")
+EOF
+}
+
+echo "=== checkerboard test patterns (no finger needed) ==="
+echo 0 > "$P/skip_config"
+echo 0xB0000800 > "$P/img_capt_size"
+echo 11266 > "$P/read_len"
+try 0x0000 "off (normal)"
+try 0xAA55 "0xAA55"
+try 0x5555 "0x5555"
+try 0xAAAA "0xAAAA"
+try 0x0F0F "0x0F0F"
+try 0xFFFF "0xFFFF"
+echo "=== restore ==="
+echo 0 > "$P/test_pattern"
+echo 0xB0000800 > "$P/img_capt_size"
+echo 11266 > "$P/read_len"
+echo done

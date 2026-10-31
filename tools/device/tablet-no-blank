@@ -1,0 +1,11 @@
+#!/bin/sh
+# 这台平板是当桌面用的，永远不要自动熄屏。
+# 有些程序（xscreensaver、power manager）会绕过 xset 直接把 fb 置为 blank，
+# 所以这里每 30 秒检查一次，一旦发现被关掉就点亮。
+while true; do
+    if [ -w /sys/class/graphics/fb0/blank ]; then
+        cur=$(cat /sys/class/graphics/fb0/blank 2>/dev/null)
+        [ "$cur" != "0" ] && echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+    fi
+    sleep 30
+done

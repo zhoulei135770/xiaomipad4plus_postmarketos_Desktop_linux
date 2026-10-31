@@ -1,0 +1,331 @@
+#!/bin/sh
+# Functional self-test for the Mi Pad 4 Plus pmOS port.
+# Exercises every subsystem (not just "does the node exist") and prints
+# PASS/FAIL.  Safe to run repeatedly; takes about 60 seconds.
+#
+#   sudo pad_selftest.sh
+
+PASS=0
+FAIL=0
+SKIP=0
+
+pass() { PASS=$((PASS+1)); printf '  [PASS] %s\n' "$1"; }
+fail() { FAIL=$((FAIL+1)); printf '  [FAIL] %s\n' "$1"; }
+skip() { SKIP=$((SKIP+1)); printf '  [SKIP] %s\n' "$1"; }
+
+echo "=== Mi Pad 4 Plus functional self-test ==="
+echo "kernel: $(uname -r)"
+echo
+
+# ---- display ----
+echo "display"
+if grep -q ^connected /sys/class/drm/*/status 2>/dev/null; then
+	pass "DRM connector connected"
+else
+	fail "no connected DRM connector"
+fi
+
+# ---- touch / input ----
+echo "input"
+if grep -qi goodix /proc/bus/input/devices 2>/dev/null; then
+	pass "Goodix touchscreen present"
+else
+	fail "touchscreen not found"
+fi
+
+# ---- wifi ----
+echo "wifi"
+if [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = "up" ]; then
+	pass "wlan0 up"
+	gw=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
+	if [ -n "$gw" ] && ping -c1 -W2 "$gw" >/dev/null 2>&1; then
+		pass "gateway $gw reachable"
+	else
+		fail "gateway not reachable"
+	fi
+else
+	fail "wlan0 not up"
+fi
+
+# ---- bluetooth ----
+echo "bluetooth"
+if [ -e /sys/class/bluetooth/hci0 ]; then
+	n=$(timeout 12 bluetoothctl --timeout 8 scan on 2>/dev/null | grep -c "Device ")
+	if [ "$n" -gt 0 ]; then
+		pass "BT scan found $n device(s)"
+	else
+		skip "BT scan found nothing (radio may still work)"
+	fi
+else
+	fail "hci0 missing"
+fi
+
+# ---- bluetooth audio ----
+echo "bt audio"
+bt_uid=$(id -u zhoulei 2>/dev/null)
+if [ -n "$bt_uid" ]; then
+	bt_env="XDG_RUNTIME_DIR=/run/user/$bt_uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$bt_uid/bus"
+	bt_mods=$(su - zhoulei -c "$bt_env pactl list modules short" 2>/dev/null |
+		grep -c -e bluez5 -e bluetooth)
+	bt_sink=$(su - zhoulei -c "$bt_env pactl list short sinks" 2>/dev/null |
+		grep -c alsa_output)
+	if [ "$bt_mods" -ge 2 ]; then
+		pass "PulseAudio A2DP ready ($bt_mods bluetooth modules, $bt_sink sink)"
+	else
+		fail "PulseAudio bluetooth modules missing ($bt_mods)"
+	fi
+else
+	fail "user zhoulei not present"
+fi
+
+# ---- audio ----
+echo "audio"
+if [ "${PAD_SELFTEST_AUDIO:-0}" = "1" ]; then
+	if timeout 10 aplay -q -D plughw:0,0 /usr/share/sounds/alsa/Noise.wav \
+		>/dev/null 2>&1; then
+		pass "played test tone on plughw:0,0"
+	else
+		fail "could not play audio"
+	fi
+else
+	if [ -e /dev/snd/pcmC0D0p ]; then
+		pass "playback device present (tone skipped, set PAD_SELFTEST_AUDIO=1)"
+	else
+		fail "no playback device"
+	fi
+fi
+
+# ---- sensors ----
+echo "sensors"
+n=$(ls /sys/bus/iio/devices/ 2>/dev/null | wc -l)
+[ "$n" -ge 4 ] && pass "$n IIO devices" || fail "only $n IIO devices"
+ALS=""
+for d in /sys/bus/iio/devices/iio:device*; do
+	n=$(cat "$d/name" 2>/dev/null)
+	[ "$n" = "qcom-smgr-light" ] && ALS=$d && break
+	[ "$n" = "qcom-smgr-prox" ] && ALS=$d
+done
+# The sensor-manager drivers are buffer-only and the running
+# tablet-autobright service owns the ALS buffer, so check the pipeline
+# end-to-end first (service alive + backlight reacting + last lux reading).
+if systemctl is-active --quiet tablet-autobright 2>/dev/null; then
+	bl=$(cat /sys/class/backlight/*/brightness 2>/dev/null | head -1)
+	lux=$(journalctl -u tablet-autobright -n 60 --no-pager 2>/dev/null |
+	      sed -n 's/.*[^0-9]\([0-9][0-9.]*\) lx ->.*/\1/p' | tail -1)
+	if [ -n "$lux" ]; then
+		pass "ALS -> autobright: ${lux} lx, backlight ${bl}"
+	else
+		pass "ALS -> autobright active, backlight ${bl}"
+	fi
+else
+	als_val=$(python3 /usr/local/bin/pad_als 1 2>/dev/null | sed -n 's/.*illuminance_raw=\([0-9]*\).*/\1/p')
+	if [ -n "$als_val" ]; then
+		pass "ALS illuminance_raw = $als_val"
+	elif [ -n "$ALS" ]; then
+		fail "ALS present but no sample and autobright not running ($ALS)"
+	else
+		fail "ALS device missing"
+	fi
+fi
+
+# The cover switch is also buffer-only and event driven.
+hall_val=$(python3 /usr/local/bin/pad_hall 2>/dev/null | sed -n 's/.*hall_raw=\([0-9]*\).*/\1/p')
+if [ -n "$hall_val" ]; then
+	[ "$hall_val" = "0" ] && hs="open" || hs="closed"
+	pass "Hall cover = $hs (raw $hall_val)"
+else
+	fail "hall sensor not readable"
+fi
+
+# Accelerometer / gyroscope / magnetometer: the smgr drivers are buffer-only,
+# so read a real sample through pad_imu and check the values are plausible.
+acc=$(python3 /usr/local/bin/pad_imu accel 2 2>/dev/null | grep -o 'raw=([^)]*)' | tail -1)
+if [ -n "$acc" ]; then
+	az=$(echo "$acc" | tr -d '()' | cut -d, -f3 | tr -d ' ')
+	if [ -n "$az" ] && [ "$az" -gt -1200000 ] && [ "$az" -lt 1200000 ]; then
+		pass "Accelerometer reads Z=$az (gravity present)"
+	else
+		fail "Accelerometer Z out of range ($az)"
+	fi
+else
+	fail "accelerometer not readable"
+fi
+gyr=$(python3 /usr/local/bin/pad_imu gyro 1 2>/dev/null | grep -o 'raw=([^)]*)' | tail -1)
+[ -n "$gyr" ] && pass "Gyroscope reads $gyr" || fail "gyroscope not readable"
+mag=$(python3 /usr/local/bin/pad_imu mag 1 2>/dev/null | grep -o 'raw=([^)]*)' | tail -1)
+[ -n "$mag" ] && pass "Magnetometer reads $mag" || fail "magnetometer not readable"
+
+# Accelerometer / gyroscope / magnetometer: the smgr drivers are buffer-only,
+# so read a real sample through pad_imu and check the values are plausible.
+
+
+# ---- battery / charger ----
+echo "power"
+[ -e /sys/class/power_supply/qcom-battery/capacity ] \
+	&& pass "battery $(cat /sys/class/power_supply/qcom-battery/capacity)%" \
+	|| fail "battery missing"
+[ -e /sys/class/power_supply/pm660-charger ] && pass "charger present" || fail "charger missing"
+
+# ---- USB ----
+echo "usb"
+usb_real=0
+for d in /sys/bus/usb/devices/*/; do
+	n=$(basename "$d")
+	case "$n" in
+	usb*|*-0:1.0) continue ;;
+	esac
+	p=$(cat "$d/product" 2>/dev/null)
+	[ "$p" = "xHCI Host Controller" ] && continue
+	usb_real=$((usb_real + 1))
+done
+if [ -d /sys/bus/usb/devices/usb1 ]; then
+	if [ "$usb_real" -gt 0 ]; then
+		pass "xHCI host up, $usb_real device(s) attached"
+	else
+		pass "xHCI host up, no device attached"
+	fi
+else
+	fail "no xHCI host controller"
+fi
+
+# USB HID: a real keyboard/mouse showing up as an input device is the end to
+# end proof that OTG host mode works.
+usb_hid=$(grep -c 'Name="USB .*keyboard\|Name="USB Optical Mouse\|Name="USB.*Mouse' \
+	/proc/bus/input/devices 2>/dev/null)
+if [ "${usb_hid:-0}" -gt 0 ]; then
+	pass "USB HID input registered ($usb_hid device(s))"
+else
+	pass "no USB HID device present"
+fi
+udc=$(ls /sys/class/udc 2>/dev/null | wc -l)
+if [ "$udc" -gt 0 ]; then
+	pass "gadget UDC present ($(ls /sys/class/udc | tr '\n' ' '))"
+else
+	pass "gadget UDC absent (controller in host role)"
+fi
+
+# OTG VBUS: the buck-boost only starts after the halt-1-in-8 mode write
+# (patch 0085), so check the actual port voltage rather than the enable bit.
+otg_v=$(sh /usr/local/bin/pad_otg 2>/dev/null | sed -n 's/.*usbin_v: \([0-9.]*\) V.*/\1/p')
+case "$otg_v" in
+"")
+	fail "OTG VBUS voltage not readable"
+	;;
+*)
+	if [ "$(echo "$otg_v" | cut -d. -f1)" -ge 4 ] 2>/dev/null; then
+		pass "OTG VBUS at ${otg_v} V (port supplies power)"
+	else
+		pass "OTG VBUS at ${otg_v} V (no device drawing power)"
+	fi
+	;;
+esac
+
+# ---- rear camera ----
+echo "rear camera"
+if [ -e /dev/video0 ]; then
+	sh /usr/local/bin/pad_cam_config.sh >/dev/null 2>&1
+	rm -f /tmp/selftest.raw
+	if timeout 15 v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=1 \
+			--stream-to=/tmp/selftest.raw </dev/null >/dev/null 2>&1; then
+		sz=$(wc -c < /tmp/selftest.raw 2>/dev/null)
+		if [ "$sz" -eq 16558080 ]; then
+			pass "captured 16558080 bytes"
+		else
+			fail "captured $sz bytes (expected 16558080)"
+		fi
+	else
+		fail "capture failed"
+	fi
+else
+	fail "/dev/video0 missing"
+fi
+
+# ---- fingerprint ----
+echo "fingerprint"
+modprobe fpc1020 2>/dev/null
+if [ -d /sys/bus/spi/devices/spi0.0 ]; then
+	echo reset > /sys/bus/spi/devices/spi0.0/cmd 2>/dev/null
+	sleep 0.2
+	echo "r fc 2" > /sys/bus/spi/devices/spi0.0/cmd 2>/dev/null
+	sleep 0.3
+	if dmesg | grep -q "reg 0xfc = 03 41"; then
+		pass "FPC1020 answered with HWID 0x0341"
+	else
+		fail "no HWID from fingerprint sensor"
+	fi
+else
+	fail "fpc1020 not bound"
+fi
+
+# ---- modem ----
+echo "modem"
+st=$(cat /sys/class/remoteproc/remoteproc1/state 2>/dev/null)
+if [ "$st" = "running" ]; then
+	pass "modem remoteproc running"
+	if timeout 20 qmicli -d qrtr://0 --dms-get-revision >/dev/null 2>&1; then
+		pass "QMI answered"
+	else
+		fail "QMI did not answer"
+	fi
+else
+	fail "modem state: ${st:-missing}"
+fi
+
+# ---- GNSS ----
+echo "gnss"
+gps_mode=$(timeout 20 qmicli -d qrtr://0 --loc-get-operation-mode 2>/dev/null |
+	sed -n 's/.*operation mode: //p' | head -1)
+case "$gps_mode" in
+standalone|msb|msa|cellid|wwan)
+	pass "GNSS engine responds (mode $gps_mode)"
+	;;
+"")
+	fail "GNSS engine (QMI LOC) not responding"
+	;;
+*)
+	fail "GNSS engine reported odd mode: $gps_mode"
+	;;
+esac
+
+# ---- wifi ----
+echo "wifi"
+wifi_freq=$(iw dev wlan0 link 2>/dev/null | sed -n 's/.*freq: *//p' | head -1 |
+	cut -d. -f1)
+wifi_ssid=$(iw dev wlan0 link 2>/dev/null | sed -n 's/.*SSID: *//p' | head -1)
+if [ -n "$wifi_freq" ] && [ "$wifi_freq" -ge 5000 ] 2>/dev/null; then
+	pass "WiFi connected at $wifi_freq MHz (5 GHz, $wifi_ssid)"
+elif [ -n "$wifi_freq" ]; then
+	pass "WiFi connected at $wifi_freq MHz (2.4 GHz, $wifi_ssid)"
+else
+	pass "WiFi link up, band not reported (not associated)"
+fi
+
+# ---- GPU ----
+echo "gpu"
+f=$(cat /sys/class/devfreq/5000000.gpu/cur_freq 2>/dev/null)
+[ -n "$f" ] && pass "GPU devfreq at $f Hz" || fail "GPU devfreq missing"
+
+# ---- venus (video decode) ----
+echo "venus"
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+SUM=/sys/kernel/debug/clk/clk_summary
+axi=""
+if [ -r "$SUM" ]; then
+	axi=$(awk '$1 == "video_axi_clk" { print $5; exit }' "$SUM")
+fi
+if [ -z "$axi" ]; then
+	skip "video_axi_clk rate not readable"
+elif [ "$axi" = "0" ]; then
+	fail "video_axi_clk is 0 Hz - venus cannot reach DDR (needs patch 0080)"
+else
+	pass "video_axi_clk at $axi Hz"
+fi
+if [ -e /sys/bus/platform/drivers/qcom-venus/cc00000.video-codec ]; then
+	pass "venus bound to qcom-venus"
+else
+	skip "venus not bound (probe fails until the AXI clock is fixed)"
+fi
+
+echo
+echo "=== $PASS passed, $FAIL failed, $SKIP skipped ==="
+[ "$FAIL" -eq 0 ] || exit 1

@@ -1,0 +1,31 @@
+[Unit]
+Description=Ambient-light automatic backlight (Xiaomi Mi Pad 4 Plus)
+Documentation=file:/usr/local/bin/tablet-autobright
+# The kernel's qcom-smgr-prox driver exposes the CM3232 ALS as an IIO_PROXIMITY
+# channel, which iio-sensor-proxy ignores; this daemon reads the IIO buffer
+# directly and drives /sys/class/backlight/lcd-backlight.
+After=iio-sensor-proxy.service
+Wants=iio-sensor-proxy.service
+# Only useful on a machine that actually has the ALS
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tablet-autobright
+Restart=on-failure
+RestartSec=5
+# IIO buffer/enable and scan_elements are root-owned 0644; udev cannot relax
+# them (tried, see 09-P0-1-SENSORS.md). The daemon only touches those files.
+AmbientCapabilities=CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+NoNewPrivileges=no
+User=zhoulei
+Group=zhoulei
+
+# Modest hardening that does not interfere with sysfs access
+ProtectSystem=no
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=graphical.target

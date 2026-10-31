@@ -1,0 +1,3 @@
+#!/bin/sh
+# see /etc/systemd/system/tablet-reconnect.service
+exec /bin/sh /usr/local/lib/tablet-reconnect.sh

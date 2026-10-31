@@ -1,0 +1,191 @@
+#!/usr/sbin/python3
+"""tablet-rotate - manual screen rotation for the Mi Pad 4 Plus.
+
+    tablet-rotate normal      portrait, upright
+    tablet-rotate left        landscape (content rotated clockwise)
+    tablet-rotate inverted    portrait, upside down
+    tablet-rotate right       landscape (the other way)
+    tablet-rotate cycle       step to the next orientation
+    tablet-rotate status      print the current mode
+
+Why this mapping looks odd: on this panel the DPU's hardware rotation of the
+primary plane is broken -- ``xrandr --rotate right`` blanks the screen and
+leaves only the cursor.  ``--rotate left --reflect xy`` is mathematically the
+same as ``right`` but takes the reflection path, which works.
+
+The touchscreen needs the matching libinput Calibration Matrix; the XInput
+"Coordinate Transformation Matrix" is read-only on libinput devices here.
+"""
+import fcntl
+import os
+import subprocess
+import sys
+import time
+
+OUTPUT = 'DSI-1'
+STATE = os.path.expanduser('~/.config/tablet/rotation-state')
+LOCK = '/tmp/tablet-rotate.lock'
+COOLDOWN = 4.0          # 秒；触摸按钮按住不放会重复触发，这里做长去抖
+
+MODES = {
+    'normal':   ('normal', 'normal'),
+    'inverted': ('inverted', 'normal'),
+    'left':     ('left', 'xy'),        # 顺时针 90°
+    'right':    ('left', 'normal'),    # 逆时针 90°
+}
+
+# 触摸校准矩阵（libinput Calibration Matrix），已实机验证
+CTM = {
+    'normal':   ['1', '0', '0', '0', '1', '0', '0', '0', '1'],
+    'inverted': ['-1', '0', '1', '0', '-1', '1', '0', '0', '1'],
+    'left':     ['0', '1', '0', '-1', '0', '1', '0', '0', '1'],
+    'right':    ['0', '-1', '1', '1', '0', '0', '0', '0', '1'],
+}
+
+ORDER = ['normal', 'left', 'inverted', 'right']
+
+LABELS = {
+    'normal':   '竖屏',
+    'left':     '横屏 · 左旋',
+    'inverted': '竖屏 · 倒置',
+    'right':    '横屏 · 右旋',
+}
+
+TOUCH_HINTS = ('touchscreen', 'touch screen', 'goodix', 'fts_', 'synaptics', 'atmel', 'ilitek')
+
+
+def env():
+    e = dict(os.environ)
+    e.setdefault('DISPLAY', ':0')
+    e.setdefault('XAUTHORITY', '/home/zhoulei/.Xauthority')
+    return e
+
+
+def guard():
+    """Ignore repeats that arrive within COOLDOWN seconds."""
+    try:
+        fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stamp = os.fstat(fd).st_mtime
+        if time.time() - stamp < COOLDOWN:
+            os.close(fd)
+            return None
+        os.utime(fd, None)
+        return fd            # 调用方负责 close
+    except (BlockingIOError, OSError):
+        return None
+
+
+def touch_ids():
+    try:
+        out = subprocess.run(['xinput', 'list', '--short'], capture_output=True,
+                             text=True, env=env())
+    except FileNotFoundError:
+        return []
+    found = []
+    for line in out.stdout.splitlines():
+        import re
+        mid = re.search(r'id=(\d+)', line)
+        if not mid:
+            continue
+        name = line.split('id=')[0]
+        for ch in ' \t⎜↳|┃\\':
+            name = name.replace(ch, ' ')
+        if any(h in name.lower() for h in TOUCH_HINTS):
+            found.append(mid.group(1))
+    return found
+
+
+def apply(mode):
+    rot, refl = MODES[mode]
+    r = subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', rot, '--reflect', refl],
+                       capture_output=True, text=True, env=env())
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:120]
+    for dev in touch_ids():
+        subprocess.run(['xinput', 'set-prop', dev, 'libinput Rotation Angle', '0'],
+                       capture_output=True, text=True, env=env())
+        subprocess.run(['xinput', 'set-prop', dev, 'libinput Calibration Matrix'] + CTM[mode],
+                       capture_output=True, text=True, env=env())
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, 'w') as f:
+        f.write(mode + '\n')
+    return True, ''
+
+
+def current():
+    """Best guess at the current mode (xrandr wins, file is a fallback)."""
+    try:
+        import re
+        out = subprocess.run(['xrandr', '--query'], capture_output=True,
+                             text=True, env=env()).stdout
+        line = next((l for l in out.splitlines() if l.startswith(OUTPUT)), '')
+        # 只取几何尺寸后面的那个词，否则会把括号里的
+        # "(normal left inverted right x axis y axis)" 也匹配进去
+        m = re.search(r'\d+x\d+\+\d+\+\d+\s+(\S+)(?:\s+(X and Y axis))?', line)
+        if m:
+            rot, refl = m.group(1), bool(m.group(2))
+            if rot == 'normal':
+                return 'normal'
+            if rot == 'inverted':
+                return 'inverted'
+            if rot == 'left':
+                return 'left' if refl else 'right'
+            if rot == 'right':
+                return 'right' if refl else 'left'
+    except Exception:
+        pass
+    try:
+        return open(STATE).read().strip()
+    except Exception:
+        return 'normal'
+
+
+def notify(text):
+    try:
+        subprocess.run(['notify-send', '-a', '旋转', '-t', '1800', '屏幕方向', text],
+                       capture_output=True, env=env())
+    except Exception:
+        pass
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ('status', '-s'):
+        m = current()
+        print(f'{m}  ({LABELS.get(m, m)})')
+        return 0
+
+    arg = sys.argv[1]
+    fd = guard()
+    if fd is None:
+        return 0            # 冷却中，静默忽略（触摸重复触发）
+
+    try:
+        if arg == 'cycle':
+            cur = current()
+            nxt = ORDER[(ORDER.index(cur) + 1) % len(ORDER)] if cur in ORDER else 'normal'
+            ok, err = apply(nxt)
+            if ok:
+                print(f'{nxt} {LABELS[nxt]}')
+                notify(LABELS[nxt])
+                return 0
+            print('失败:', err)
+            return 1
+
+        if arg not in MODES:
+            print('用法: tablet-rotate [normal|left|inverted|right|cycle|status]')
+            return 2
+
+        ok, err = apply(arg)
+        if ok:
+            print(f'{arg} {LABELS[arg]}')
+            notify(LABELS[arg])
+            return 0
+        print('失败:', err)
+        return 1
+    finally:
+        os.close(fd)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

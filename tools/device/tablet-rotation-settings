@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""tablet-rotation-settings - GUI for rotation preferences (GTK3).
+
+WHAT THE USER CAN SET
+---------------------
+  * Auto-rotate on/off
+  * Pin to a specific orientation (normal / left / right / inverted)
+  * Whether rotating keeps the session (live) or is manual
+  * Touch coordinate matrix follows the rotation automatically
+
+WHY LIVE ROTATION IS SAFE HERE
+------------------------------
+The GPU hard-hang recorded in 07-xorg-xfce.md was caused by *glamor*
+compositing a rotated framebuffer on Adreno 512 (a5xx ring fault).
+With AccelMethod "none" (llvmpipe) rotation is a pure CPU scanout transform:
+measured Xorg CPU usage stays ~1.3% and the DRM fault counter never moves.
+So we can call `xrandr --rotate` at runtime and never restart greetd.
+
+SETTINGS ARE PERSISTED in a small JSON file under /etc/tablet/.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+SETTINGS = "/etc/tablet/rotation.json"
+ORIENTATIONS = ["normal", "left", "right", "inverted"]
+LABELS = {
+    "normal": "竖屏 (1200×1920)",
+    "left": "横屏·左转 (1920×1200)",
+    "right": "横屏·右转 (1920×1200)",
+    "inverted": "竖屏·倒置 (1200×1920)",
+}
+
+# Coordinate transformation matrices for the Goodix touchscreen, one per
+# rotation. These are the standard libinput/X11 values; verified against the
+# matrices already used by xfce-tablet-session for "left".
+MATRIX = {
+    "normal":   [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "left":     [0, 1, 0, -1, 0, 1, 0, 0, 1],
+    "right":    [0, -1, 1, 1, 0, 0, 0, 0, 1],
+    "inverted": [-1, 0, 1, 0, -1, 1, 0, 0, 1],
+}
+
+DEFAULTS = {
+    "auto_rotate": True,
+    "pinned": "left",
+    "follow_touch": True,
+}
+
+
+def load() -> dict:
+    try:
+        with open(SETTINGS) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        d = {}
+    out = dict(DEFAULTS)
+    out.update({k: v for k, v in d.items() if k in DEFAULTS})
+    if out["pinned"] not in ORIENTATIONS:
+        out["pinned"] = DEFAULTS["pinned"]
+    return out
+
+
+def save(cfg: dict) -> None:
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    tmp = SETTINGS + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, SETTINGS)
+
+
+def run(cmd, env_extra=None):
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/10000")
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def output_name() -> str | None:
+    r = run(["xrandr", "--query"])
+    for line in r.stdout.splitlines():
+        if " connected" in line:
+            return line.split()[0]
+    return None
+
+
+def current_rotation() -> str | None:
+    """Parse the active rotation from `xrandr --query`.
+
+    A connected line looks like:
+        DSI-1 connected 1920x1200+0+0 left (normal left inverted right x axis y axis) 0mm x 0mm
+                                       ^^^^ field 4 = ACTIVE rotation
+                                            ^ field 5 starts the SUPPORTED list in parens
+
+    Field 5 must never be read as the state - it is always "(normal".
+    """
+    out = output_name()
+    if not out:
+        return None
+    r = run(["xrandr", "--query"])
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[0] == out and parts[1] == "connected":
+            cand = parts[3]
+            if cand in ORIENTATIONS:
+                return cand
+            # xrandr may print "(normal" style when rotation is unknown
+            cand = cand.strip("()")
+            if cand in ORIENTATIONS:
+                return cand
+    return None
+
+
+def touch_devices() -> list[str]:
+    """IDs of the Goodix touchscreen *pointer* nodes.
+
+    `xinput list --id-only` is not supported by this build, so parse
+    `xinput list --short` instead. The touchscreen also registers a
+    keyboard node that must be skipped.
+    """
+    r = run(["xinput", "list", "--short"])
+    ids = []
+    for line in r.stdout.splitlines():
+        if "goodix" not in line.lower():
+            continue
+        if "keyboard" in line.lower():
+            continue
+        if "id=" not in line:
+            continue
+        ids.append(line.split("id=")[1].split()[0].strip())
+    return ids
+
+
+def apply_rotation(orient: str, follow_touch: bool = True) -> tuple[bool, str]:
+    out = output_name()
+    if not out:
+        return False, "找不到显示输出"
+    r = run(["xrandr", "--output", out, "--rotate", orient])
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout or "xrandr 失败").strip()
+    if follow_touch:
+        m = MATRIX[orient]
+        devs = touch_devices()
+        for dev in devs:
+            run(["xinput", "set-prop", dev,
+                 "Coordinate Transformation Matrix"] + [str(x) for x in m])
+            # Some libinput builds also honour this; setting it keeps the
+            # touch deltas consistent when the compositor reads it.
+            run(["xinput", "set-prop", dev, "libinput Rotation Angle", "0"])
+        if not devs:
+            return True, f"{LABELS.get(orient, orient)}（警告：没找到触摸设备）"
+    return True, f"{LABELS.get(orient, orient)}"
+
+
+def touch_matrix(dev: str) -> str | None:
+    """Return the Coordinate Transformation Matrix as a normalised string."""
+    r = run(["xinput", "list-props", dev])
+    for line in r.stdout.splitlines():
+        if "Coordinate Transformation Matrix" in line and "Default" not in line:
+            if ":" in line:
+                return " ".join(line.split(":", 1)[1].split())
+    return None
+
+
+def gpu_faults() -> int:
+    try:
+        r = subprocess.run(["dmesg"], capture_output=True, text=True)
+        return sum(1 for ln in r.stdout.splitlines()
+                   if "hangcheck" in ln.lower() or "gpu fault" in ln.lower())
+    except Exception:
+        return -1
+
+
+def build_ui():
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+
+    cfg = load()
+
+    win = Gtk.Window(title="屏幕旋转设置")
+    win.set_border_width(16)
+    win.set_default_size(460, -1)
+    win.set_position(Gtk.WindowPosition.CENTER)
+    win.connect("destroy", Gtk.main_quit)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+    win.add(outer)
+
+    # --- header ---
+    hdr = Gtk.Label()
+    hdr.set_markup("<span size='large' weight='bold'>屏幕旋转</span>")
+    hdr.set_xalign(0)
+    outer.add(hdr)
+
+    status = Gtk.Label()
+    status.set_xalign(0)
+    status.set_line_wrap(True)
+    outer.add(status)
+
+    def refresh_status():
+        cur = current_rotation()
+        faults = gpu_faults()
+        auto = "开" if cfg["auto_rotate"] else "关"
+        txt = (f"当前方向：<b>{LABELS.get(cur, cur or '未知')}</b>\n"
+               f"自动旋转：<b>{auto}</b>"
+               + (f"　·　GPU 故障计数：{faults}" if faults >= 0 else ""))
+        status.set_markup(txt)
+
+    # --- auto rotate switch ---
+    box_auto = Gtk.Box(spacing=10)
+    lbl_auto = Gtk.Label(label="跟随重力自动旋转")
+    lbl_auto.set_xalign(0)
+    sw = Gtk.Switch()
+    sw.set_active(cfg["auto_rotate"])
+    box_auto.pack_start(lbl_auto, True, True, 0)
+    box_auto.pack_end(sw, False, False, 0)
+    outer.add(box_auto)
+
+    hint = Gtk.Label()
+    hint.set_markup("<span size='small' foreground='#666'>"
+                    "关闭后屏幕锁定在下方选定的方向。</span>")
+    hint.set_xalign(0)
+    outer.add(hint)
+
+    # --- orientation radio buttons ---
+    frame = Gtk.Frame(label=" 锁定方向 ")
+    inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    inner.set_border_width(12)
+    frame.add(inner)
+    outer.add(frame)
+
+    group = None
+    radios = {}
+    for o in ORIENTATIONS:
+        rb = Gtk.RadioButton.new_with_label_from_widget(group, LABELS[o])
+        group = group or rb
+        rb.set_active(cfg["pinned"] == o)
+        radios[o] = rb
+        inner.add(rb)
+
+    # --- follow touch ---
+    cb_touch = Gtk.CheckButton(label="触摸坐标跟随旋转（必须开启，否则点哪都不对）")
+    cb_touch.set_active(cfg["follow_touch"])
+    outer.add(cb_touch)
+
+    # --- safety note ---
+    note = Gtk.Label()
+    note.set_markup(
+        "<span size='small' foreground='#666'>"
+        "当前使用软件渲染（llvmpipe），旋转是即时的，<b>不会关闭正在运行的程序</b>。\n"
+        "GPU 故障计数若持续为 0，说明旋转安全。</span>")
+    note.set_xalign(0)
+    note.set_line_wrap(True)
+    outer.add(note)
+
+    # --- buttons ---
+    btnbox = Gtk.Box(spacing=10)
+    btn_apply = Gtk.Button(label="应用")
+    btn_close = Gtk.Button(label="关闭")
+    btnbox.pack_end(btn_close, False, False, 0)
+    btnbox.pack_end(btn_apply, False, False, 0)
+    outer.add(btnbox)
+
+    msg = Gtk.Label()
+    msg.set_xalign(0)
+    msg.set_line_wrap(True)
+    outer.add(msg)
+
+    def do_apply(_w=None):
+        cfg["auto_rotate"] = sw.get_active()
+        cfg["follow_touch"] = cb_touch.get_active()
+        for o, rb in radios.items():
+            if rb.get_active():
+                cfg["pinned"] = o
+                break
+        save(cfg)
+
+        # Apply immediately when auto-rotate is off: pin to the chosen mode.
+        if not cfg["auto_rotate"]:
+            ok, detail = apply_rotation(cfg["pinned"], cfg["follow_touch"])
+            msg.set_markup(
+                f"<span foreground='{'#1a7f37' if ok else '#c01c28'}'>"
+                f"{'已应用：' if ok else '失败：'}{detail}</span>")
+        else:
+            msg.set_markup("<span foreground='#1a7f37'>"
+                           "已保存，自动旋转由 orientd 处理</span>")
+
+        # Tell orientd to reload (SIGHUP)
+        subprocess.run(["systemctl", "kill", "-s", "HUP",
+                        "tablet-orientd"], capture_output=True)
+        GLib.timeout_add(300, lambda: (refresh_status(), False)[1])
+
+    btn_apply.connect("clicked", do_apply)
+    btn_close.connect("clicked", lambda _w: Gtk.main_quit)
+
+    refresh_status()
+    win.show_all()
+    Gtk.main()
+
+
+def main() -> int:
+    # Console mode, useful for scripting/testing without a display.
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == "status":
+            cfg = load()
+            print(f"  当前方向 : {current_rotation()}")
+            print(f"  自动旋转 : {cfg['auto_rotate']}")
+            print(f"  锁定方向 : {cfg['pinned']}")
+            print(f"  触摸跟随 : {cfg['follow_touch']}")
+            for dev in touch_devices():
+                print(f"  触摸矩阵 : {touch_matrix(dev)}")
+            print(f"  GPU 故障 : {gpu_faults()}")
+            return 0
+        if cmd == "set" and len(sys.argv) >= 3:
+            key, val = sys.argv[2], sys.argv[3]
+            cfg = load()
+            if key == "auto":
+                cfg["auto_rotate"] = val.lower() in ("1", "on", "true", "yes")
+            elif key == "pin":
+                if val not in ORIENTATIONS:
+                    print(f"方向必须是 {ORIENTATIONS}", file=sys.stderr)
+                    return 2
+                cfg["pinned"] = val
+            elif key == "touch":
+                cfg["follow_touch"] = val.lower() in ("1", "on", "true", "yes")
+            else:
+                print("未知设置项", file=sys.stderr)
+                return 2
+            save(cfg)
+            print("已保存")
+            return 0
+        if cmd == "rotate" and len(sys.argv) >= 3:
+            o = sys.argv[2]
+            if o not in ORIENTATIONS:
+                print(f"方向必须是 {ORIENTATIONS}", file=sys.stderr)
+                return 2
+            ok, d = apply_rotation(o, load()["follow_touch"])
+            print(("OK  " if ok else "FAIL ") + d)
+            return 0 if ok else 1
+        print(__doc__)
+        return 1
+
+    try:
+        build_ui()
+    except Exception as exc:  # no display, missing gi, etc.
+        print(f"tablet-rotation-settings: 无法启动界面: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

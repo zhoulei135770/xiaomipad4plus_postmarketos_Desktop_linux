@@ -1,0 +1,14 @@
+#!/bin/sh
+case "$1" in
+  90)     m="0 -1 1 1 0 0 0 0 1" ;;
+  270)    m="0 1 0 -1 0 1 0 0 1" ;;
+  normal) m="1 0 0 0 1 0 0 0 1" ;;
+  180)    m="-1 0 1 0 -1 1 0 0 1" ;;
+  *) echo "usage: tablet-touch-matrix 90|270|normal|180" >&2; exit 2 ;;
+esac
+printf 'ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="%s"\n' "$m" > /etc/udev/rules.d/99-goodix-landscape.rules
+udevadm control --reload-rules
+echo 0-005d > /sys/bus/i2c/drivers/Goodix-TS/unbind 2>/dev/null
+sleep 0.1
+echo 0-005d > /sys/bus/i2c/drivers/Goodix-TS/bind 2>/dev/null
+sleep 0.2

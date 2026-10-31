@@ -1,0 +1,17 @@
+[Unit]
+Description=Keep Goodix touchscreen aligned with X screen rotation
+After=graphical.target
+PartOf=graphical.target
+
+[Service]
+Type=simple
+User=zhoulei
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/zhoulei/.Xauthority
+ExecStart=/usr/local/bin/tablet-touch-rotate --verbose
+Restart=always
+RestartSec=3
+Nice=10
+
+[Install]
+WantedBy=graphical.target

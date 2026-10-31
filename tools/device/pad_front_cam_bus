@@ -1,0 +1,37 @@
+#!/bin/sh
+# Figure out which i2c bus the front camera node is on and whether that bus is
+# actually wired to the CCI master 1 pins.
+echo "=== i2c-4 identity ==="
+cat /sys/bus/i2c/devices/i2c-4/name 2>/dev/null
+readlink -f /sys/bus/i2c/devices/i2c-4/of_node 2>/dev/null
+
+echo
+echo "=== 4-0010 driver bound? ==="
+ls -l /sys/bus/i2c/devices/4-0010/driver 2>/dev/null || echo "(no driver bound)"
+cat /sys/bus/i2c/devices/4-0010/name 2>/dev/null
+
+echo
+echo "=== DT nodes containing s5k5e8 ==="
+find /proc/device-tree -name "*s5k5e8*" 2>/dev/null | head -5
+find /proc/device-tree -name "*5e8*" 2>/dev/null | head -5
+
+echo
+echo "=== i2c4 DT node ==="
+for p in /proc/device-tree/soc/*i2c@c17*/ /proc/device-tree/soc/i2c@*; do
+	[ -d "$p" ] || continue
+	nm=$(tr -d '\0' < "$p/name" 2>/dev/null)
+	st=$(tr -d '\0' < "$p/status" 2>/dev/null)
+	echo "  $p name=$nm status=$st"
+done 2>/dev/null | head -12
+
+echo
+echo "=== CCI nodes ==="
+ls -d /proc/device-tree/soc/*cci* 2>/dev/null
+for p in /proc/device-tree/soc/*cci*/; do
+	echo "--- $p"
+	ls "$p" 2>/dev/null | head -8
+done 2>/dev/null
+
+echo
+echo "=== dmesg: cci / i2c / cam ==="
+dmesg 2>/dev/null | grep -iE "cci|i2c_qcom|s5k5e8|camss" | tail -12

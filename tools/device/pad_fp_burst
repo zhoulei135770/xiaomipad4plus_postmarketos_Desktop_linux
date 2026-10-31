@@ -1,0 +1,27 @@
+#!/bin/sh
+# Capture a burst of frames and print per-frame contrast, so a finger pressed at
+# any moment shows up as a jump in sd.  Runs capture_now (no finger wait) so it
+# keeps sampling regardless of the arm/IRQ path.
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-24}
+
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 0.4
+	dd if="$D/image" of="/tmp/burst_$i.bin" bs=1 count=11266 2>/dev/null
+	python3 - "/tmp/burst_$i.bin" "$i" <<'EOF'
+import sys
+try:
+    d = open(sys.argv[1], 'rb').read()[2:]
+except OSError:
+    print(f"  frame {sys.argv[2]:>2}: no data"); raise SystemExit
+if len(d) < 1000:
+    print(f"  frame {sys.argv[2]:>2}: {len(d)} bytes"); raise SystemExit
+m = sum(d) / len(d)
+sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+print(f"  frame {sys.argv[2]:>2}: mean {m:7.2f}  sd {sd:6.2f}  uniq {len(set(d)):3d}")
+EOF
+	i=$((i + 1))
+done
+echo "burst done"

@@ -1,0 +1,17 @@
+#!/bin/sh
+# LXQt Wayland session for the tablet (labwc + GPU rotation)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export XDG_SESSION_TYPE=wayland
+export QT_QPA_PLATFORM=wayland
+export GDK_BACKEND=wayland,x11
+# Software rendering: the DPU/msm ring hangs under compositor GPU commits on
+# this device (drm:adreno_idle timeout -> CP opcode error -> hard lockup).
+export GSK_RENDERER=cairo
+export QT_QUICK_BACKEND=software
+export XMODIFIERS=@im=fcitx
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export SDL_IM_MODULE=fcitx
+export INPUT_METHOD=fcitx
+export LC_CTYPE=zh_CN.UTF-8
+exec /usr/bin/startlxqtwayland

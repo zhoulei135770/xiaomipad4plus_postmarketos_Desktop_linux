@@ -1,0 +1,42 @@
+#!/bin/sh
+# Dump the phandles the front sensor and the CCI node reference.
+hx() { od -An -tx1 "$1" 2>/dev/null | tr -d ' \n'; }
+CCI=/proc/device-tree/soc@0/cci@ca0c000
+CAM="$CCI/i2c-bus@1/camera@10"
+
+echo "=== cci pinctrl-0 ==="
+hx "$CCI/pinctrl-0"; echo
+echo "=== cci status/clocks ==="
+tr -d '\0' < "$CCI/status" 2>/dev/null; echo
+hx "$CCI/clocks"; echo
+tr -d '\0' < "$CCI/clock-names" 2>/dev/null; echo
+
+echo
+echo "=== camera@10 properties ==="
+for p in status reg reset-gpios vana-supply vddio-supply vdig-supply clocks clock-names pinctrl-0; do
+	printf '  %-14s %s\n' "$p" "$(hx "$CAM/$p")"
+done
+printf '  %-14s %s\n' "pinctrl-names" "$(tr -d '\0' < "$CAM/pinctrl-names" 2>/dev/null)"
+
+echo
+echo "=== which regulators do those phandles name ==="
+python3 - <<'EOF' 2>/dev/null
+import os, re
+base = "/proc/device-tree"
+targets = set()
+cam = base + "/soc@0/cci@ca0c000/i2c-bus@1/camera@10"
+for prop in ("vana-supply", "vddio-supply", "vdig-supply"):
+    try:
+        v = int.from_bytes(open(os.path.join(cam, prop), "rb").read(4), "big")
+        targets.add(v)
+    except OSError:
+        pass
+for root, dirs, files in os.walk(base):
+    if "phandle" in files:
+        try:
+            ph = int.from_bytes(open(os.path.join(root, "phandle"), "rb").read(4), "big")
+        except OSError:
+            continue
+        if ph in targets:
+            print("  0x%x -> %s" % (ph, root.replace(base, "")))
+EOF

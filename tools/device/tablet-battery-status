@@ -1,0 +1,57 @@
+#!/bin/sh
+# genmon XML battery indicator — 基于物理量而非 status 字符串。
+#
+# 只读 /sys/class/power_supply，无守护进程、无 D-Bus。
+B=/sys/class/power_supply/qcom-battery
+C=/sys/class/power_supply/pm660-charger
+
+cap=$(cat "$B/capacity" 2>/dev/null || echo "?")
+status=$(cat "$B/status" 2>/dev/null || echo Unknown)
+cur=$(cat "$B/current_now" 2>/dev/null || echo 0)
+volt=$(cat "$B/voltage_now" 2>/dev/null || echo 0)
+temp=$(cat "$B/temp" 2>/dev/null || echo 0)
+online=$(cat "$C/online" 2>/dev/null || echo 0)
+cmax=$(cat "$C/current_max" 2>/dev/null || echo 0)
+
+mA=$(( ${cur:-0} / 1000 ))
+[ "$mA" -lt 0 ] && { abs=$(( -mA )); sign="-"; } || { abs=$mA; sign="+"; }
+v=$(awk -v v="${volt:-0}" 'BEGIN{printf "%.2f", v/1e6}')
+t=$(awk -v t="${temp:-0}" 'BEGIN{printf "%.1f", t/10}')
+
+# ---- 用物理量判定真实状态 ----
+if [ "$online" = "1" ]; then
+    if [ "$mA" -gt 100 ]; then
+        icon="⚡"; state="正在充电"; detail="净流入 +${mA} mA"
+    elif [ "$mA" -lt -100 ]; then
+        icon="⚠️"; state="充电器供电不足，电池仍在放电"
+        detail="电池 ${abs} mA，充电器只给 $(awk -v c="${cmax:-0}" 'BEGIN{printf "%.2f", c/1e6}') A"
+    else
+        icon="✔"; state="已充满 / 浮充"; detail="电流 ${sign}${abs} mA"
+    fi
+    pwr="充电器已连接（上限 $(awk -v c="${cmax:-0}" 'BEGIN{printf "%.2f", c/1e6}') A）"
+else
+    icon="🔋"; state="使用电池"; detail="放电 ${abs} mA"; pwr="未接充电器"
+fi
+
+# ---- 剩余时间估算（放电时用容量反推） ----
+des=$(cat "$B/charge_full_design" 2>/dev/null || echo 0)
+eta=""
+if [ "$online" != "1" ] && [ "$mA" -lt -100 ] && [ "${des:-0}" -gt 0 ]; then
+    # 用设计容量 * 当前百分比 估算剩余 Ah，再除以电流
+    remain_uah=$(( des * ${cap:-0} / 100 ))
+    mins=$(( remain_uah / (-cur) * 60 ))
+    [ "$mins" -gt 0 ] && eta="约 $((mins/60)) 小时 $((mins%60)) 分后耗尽"
+fi
+
+txt="$icon ${cap}%"
+tool="电池 ${cap}% · ${state}
+${detail}
+${pwr}
+电压 ${v} V · 温度 ${t} °C
+${eta}"
+
+cat <<EOF
+<txt>$txt</txt>
+<tool>$tool</tool>
+<bar>${cap}%</bar>
+EOF

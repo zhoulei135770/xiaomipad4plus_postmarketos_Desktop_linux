@@ -1,0 +1,83 @@
+#!/bin/sh
+# Write the vendor's exact capture setup (recovered from the FPC trustlet with
+# Ghidra: FUN_0006fedc) and capture.
+#
+# The trustlet switches on the sensor revision and uses values that differ
+# completely from the public FPC1020 driver we had been copying:
+#
+#   rev 1-2:  0x8c=0x14  0x78=0000  0xa0=0000  0xa8=0x0A0F  0x6c=0x0A
+#             0x90=0x3F  0x68=00 00 00 00 14 14 14 14
+#   rev 3:    0x8c=0x14  0x78=0000  0xa0=0000  0xa8=0x0A0F  0x6c=0x0A
+#             0x90=3f 3f 3f 3f 00 00 00 00
+#             0x68=01 3f 3f 3f 14 14 14 14 14        (9 bytes!)
+#
+# Keep a finger resting on the sensor: skip_config=1 means the driver writes
+# nothing, so these values survive into the capture.
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+w() { printf 'w %s\n' "$*" > "$D/cmd"; sleep 0.03; }
+
+grab() { # label
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 1
+	dd if=$D/image of=/tmp/v.bin bs=1 count=36865 2>/dev/null
+	python3 - "$1" <<'EOF'
+import sys
+d = open('/tmp/v.bin', 'rb').read()
+if len(d) < 100:
+    print(f"  {sys.argv[1]:<26} no data"); raise SystemExit
+d = d[1:]
+m = sum(d) / len(d); sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+mark = "  <== RIDGES!" if sd > 10 else ""
+print(f"  {sys.argv[1]:<26} mean {m:6.1f} sd {sd:6.2f} uniq {len(set(d)):3d}{mark}")
+EOF
+}
+
+echo "=== keep a finger on the sensor for the whole run ==="
+echo 1 > "$P/skip_config"
+echo 0x9001 > "$P/img_capt_size"
+echo 36865 > "$P/read_len"
+
+# ---- revision 3 setup (trustlet FUN_0006fedc, uVar4 == 3) ----
+w 8c 14
+w 78 00 00
+w a0 00 00
+w a8 0f 0a
+w 6c 0a
+w 90 3f 3f 3f 3f 00 00 00 00
+w 68 01 3f 3f 3f 14 14 14 14 14
+grab "rev3 vendor setup"
+
+# ---- revision 1-2 setup ----
+w 8c 14
+w 78 00 00
+w a0 00 00
+w a8 0f 0a
+w 6c 0a
+w 90 3f
+w 68 00 00 00 00 14 14 14 14
+grab "rev1-2 vendor setup"
+
+# ---- rev3 without the 0x78 write (in case it matters) ----
+w 8c 14
+w a0 00 00
+w a8 0f 0a
+w 6c 0a
+w 90 3f 3f 3f 3f 00 00 00 00
+w 68 01 3f 3f 3f 14 14 14 14 14
+grab "rev3 no-0x78"
+
+# ---- rev3 but with our previously used endianness for PXL_CTRL ----
+w 8c 14
+w 78 00 00
+w a0 00 00
+w a8 0a 0f
+w 6c 0a
+w 90 3f 3f 3f 3f 00 00 00 00
+w 68 01 3f 3f 3f 14 14 14 14 14
+grab "rev3 pxctrl 0a0f order"
+
+echo "=== restore ==="
+echo 0 > "$P/skip_config"
+echo done

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Set the X DPMS timers for the tablet (runs at session start).
+#
+# Why this exists: xfce4-power-manager's dpms-*-sleep settings were not being
+# applied to the X server (measured: xset q showed 18000/36000 s), so the panel
+# effectively never blanked.  Setting the timers directly always works.
+#
+# 5 minutes on AC, 3 minutes on battery.
+AC=/sys/class/power_supply/pm660-charger/online
+
+# the X screensaver must not blank on its own; blanking is done by DPMS so the
+# powerkeyd daemon can unblank on input
+xset s off
+xset s noblank
+
+timeout=300
+[ "$(cat $AC 2>/dev/null)" = "1" ] || timeout=180
+xset dpms 0 0 "$timeout"

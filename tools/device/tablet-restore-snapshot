@@ -1,0 +1,29 @@
+#!/bin/sh
+# Restore the tablet's user-space configuration from a snapshot.
+#
+#   tablet-restore-snapshot            -> list available snapshots
+#   tablet-restore-snapshot <dir>      -> restore that snapshot
+#
+# This does NOT reflash anything: it only copies files back. The 10-19 disk
+# images are the last resort if the system itself is unbootable.
+set -u
+if [ $# -eq 0 ]; then
+    echo "available snapshots:"
+    ls -d /root/tablet-good-state-* 2>/dev/null | sed 's/^/  /'
+    echo
+    echo "usage: $0 <snapshot-dir>"
+    exit 0
+fi
+S="$1"
+[ -d "$S" ] || { echo "not a directory: $S"; exit 1; }
+echo "restoring from $S"
+[ -d "$S/usr-local-bin" ] && cp -a "$S/usr-local-bin/." /usr/local/bin/ && echo "  scripts"
+[ -d "$S/systemd-system" ] && cp -a "$S/systemd-system/." /etc/systemd/system/ && echo "  system units"
+[ -d "$S/systemd-user" ] && cp -a "$S/systemd-user/." /home/zhoulei/.config/systemd/user/ && echo "  user units"
+[ -d "$S/xorg" ] && cp -a "$S/xorg/." /etc/X11/ && echo "  xorg config"
+[ -d "$S/bluetooth" ] && cp -a "$S/bluetooth/main.conf" /etc/bluetooth/ 2>/dev/null && echo "  bluetooth"
+[ -e "$S/state/landscape" ] && touch /etc/tablet/landscape && echo "  landscape flag"
+[ -d "$S/user-config" ] && cp -a "$S/user-config/." /home/zhoulei/.config/xfce4/xfconf/xfce-perchannel-xml/ 2>/dev/null && echo "  panel config"
+chown -R zhoulei:zhoulei /home/zhoulei/.config/systemd/user 2>/dev/null
+systemctl daemon-reload
+echo "done. restart the desktop with: systemctl restart greetd"

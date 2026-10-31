@@ -1,0 +1,34 @@
+#!/bin/sh
+# Switch the tablet's audio output.
+#   tablet-audio speaker   -> built-in speaker (RX3 + SPK DAC)
+#   tablet-audio headphone -> 3.5mm jack     (RX1/RX2 + HPHL/HPHR)
+#   tablet-audio status    -> show current routing
+set -u
+case "${1:-status}" in
+  speaker)
+    amixer -c 0 sset "Digital RX3 MIX1 INP1" RX3 >/dev/null 2>&1
+    amixer -c 0 sset "Digital RX3 Digital" 100 >/dev/null 2>&1
+    amixer -c 0 sset "SPK DAC" on   >/dev/null 2>&1
+    amixer -c 0 sset "HPHL" ZERO    >/dev/null 2>&1
+    amixer -c 0 sset "HPHR" ZERO    >/dev/null 2>&1
+    amixer -c 0 sset "EAR_S" ZERO   >/dev/null 2>&1
+    echo "audio -> speaker"
+    ;;
+  headphone)
+    amixer -c 0 sset "SPK DAC" off  >/dev/null 2>&1
+    amixer -c 0 sset "HPHL" Switch  >/dev/null 2>&1
+    amixer -c 0 sset "HPHR" Switch  >/dev/null 2>&1
+    amixer -c 0 sset "Digital RX1 MIX1 INP1" RX1 >/dev/null 2>&1
+    amixer -c 0 sset "Digital RX2 MIX1 INP1" RX2 >/dev/null 2>&1
+    amixer -c 0 sset "Digital RX1 Digital" 100 >/dev/null 2>&1
+    amixer -c 0 sset "Digital RX2 Digital" 100 >/dev/null 2>&1
+    echo "audio -> headphones"
+    ;;
+  status)
+    printf '  SPK DAC : %s\n' "$(amixer -c 0 sget 'SPK DAC' 2>/dev/null | grep -o '\[on\]\|\[off\]')"
+    printf '  HPHL    : %s\n' "$(amixer -c 0 sget 'HPHL' 2>/dev/null | grep Item0 | sed 's/.*Item0: //')"
+    printf '  HPH R   : %s\n' "$(amixer -c 0 sget 'HPHR' 2>/dev/null | grep Item0 | sed 's/.*Item0: //')"
+    printf '  RX3 INP1: %s\n' "$(amixer -c 0 sget 'Digital RX3 MIX1 INP1' 2>/dev/null | grep Item0 | sed 's/.*Item0: //')"
+    ;;
+  *) echo "usage: $0 [speaker|headphone|status]"; exit 2 ;;
+esac

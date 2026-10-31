@@ -1,0 +1,54 @@
+#!/bin/sh
+# Capture a burst of frames and report per-frame statistics, so a finger
+# on/off transition shows up as a step in the numbers.
+#
+#   sudo pad_fp_probe [frames] [delay_ms]
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+N=${1:-15}
+DLY=${2:-800}
+
+[ -e "$D/image" ] || { echo "fpc1020 not bound"; exit 1; }
+
+# make sure the driver config is applied (no soft reset, vendor revision 4)
+echo 0 > "$P/skip_config"
+echo 0xB0004000 > "$P/img_capt_size"
+echo 11266 > "$P/read_len"
+
+# prime once so the first measured frame is already configured
+echo 1 > "$D/capture_now" 2>/dev/null
+sleep 1
+
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 0.4
+	dd if="$D/image" of="/tmp/probe_$i.bin" bs=1 count=11266 2>/dev/null
+	i=$((i + 1))
+	[ "$i" -lt "$N" ] && sleep "$(awk -v d=$DLY 'BEGIN{printf "%.2f", d/1000}')"
+done
+
+python3 - "$N" <<'EOF'
+import sys
+n = int(sys.argv[1])
+frames = []
+for i in range(n):
+    try:
+        d = open(f'/tmp/probe_{i}.bin', 'rb').read()[2:]
+    except OSError:
+        continue
+    m = sum(d) / len(d)
+    sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+    frames.append((i, d, m, sd))
+    print(f"  frame {i:2d}: mean {m:7.2f}  sd {sd:6.2f}  min {min(d):3d} max {max(d):3d}")
+if len(frames) >= 2:
+    print()
+    print("  frame-to-frame mean difference:")
+    for a in range(len(frames) - 1):
+        i1, d1, _, _ = frames[a]
+        i2, d2, _, _ = frames[a + 1]
+        # scale the difference by the 1/10 subsample for speed
+        diff = sum(abs(d1[k] - d2[k]) for k in range(0, min(len(d1), len(d2)), 10))
+        cnt = len(range(0, min(len(d1), len(d2)), 10))
+        print(f"    {i1:2d} -> {i2:2d}: {diff / cnt:6.2f}")
+EOF

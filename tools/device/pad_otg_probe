@@ -1,0 +1,31 @@
+#!/bin/sh
+# Toggle OTG VBUS and watch for USB enumeration after each step.
+list() {
+	n=0
+	for d in /sys/bus/usb/devices/*/; do
+		name=$(basename "$d")
+		case "$name" in
+		usb*|*-0:1.0) continue ;;
+		esac
+		p=$(cat "$d/product" 2>/dev/null)
+		[ -n "$p" ] && echo "    $name  $p" && n=$((n + 1))
+	done
+	[ "$n" = 0 ] && echo "    (no downstream device)"
+}
+
+echo "=== before ==="
+sh /usr/local/bin/pad_otg 2>&1 | sed 's/^/  /'
+list
+
+echo "=== OTG VBUS off ==="
+sh /usr/local/bin/pad_otg off 2>&1 | tail -2 | sed 's/^/  /'
+sleep 4
+list
+
+echo "=== OTG VBUS on ==="
+sh /usr/local/bin/pad_otg on 2>&1 | tail -2 | sed 's/^/  /'
+sleep 4
+list
+
+echo "=== dmesg ==="
+dmesg | grep -iE "usb 1-|new .* device|usbhid" | tail -6 | sed 's/^/  /'

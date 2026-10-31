@@ -1,0 +1,67 @@
+#!/bin/sh
+# Start the tablet desktop with an automatic fallback to Phosh.
+#
+# One subtlety this has to handle: a dead process can linger as a zombie and
+# still be matched by `pgrep -x <name>`. So we check the process STATE and only
+# count non-Z entries as alive.
+
+LOGDIR="$HOME/.local/share/tablet-session"
+mkdir -p "$LOGDIR" 2>/dev/null
+LOG="$LOGDIR/launcher.log"
+if ! { : >>"$LOG"; } 2>/dev/null; then LOG=/dev/null; fi
+log() { echo "[$(date '+%H:%M:%S')] $*" >>"$LOG" 2>/dev/null; }
+
+# Print the pid of a LIVE (non-zombie) process with this name, else nothing.
+live_pid() {
+    for p in $(pgrep -x "$1" 2>/dev/null); do
+        st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+        if [ "$st" != "Z" ] && [ -n "$st" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+log "=== launcher start ==="
+
+if [ -e /etc/tablet/force-phosh ]; then
+    log "force-phosh flag present -> Phosh"
+    exec /usr/libexec/phrog-greetd-session
+fi
+
+/usr/local/bin/xfce-x-session &
+XPID=$!
+log "xfce wrapper pid=$XPID"
+
+i=0
+UP=0
+while [ $i -lt 90 ]; do
+    if live_pid xfwm4 >/dev/null 2>&1; then
+        UP=1
+        log "live xfwm4 detected at ${i}s"
+        break
+    fi
+    if ! kill -0 "$XPID" 2>/dev/null; then
+        log "xfce wrapper exited at ${i}s"
+        break
+    fi
+    i=$((i+1))
+    sleep 1
+done
+
+if [ "$UP" -eq 1 ]; then
+    log "XFCE is up; waiting for it to end"
+    wait "$XPID"
+    log "XFCE session ended"
+fi
+
+log "FALLBACK -> Phosh"
+pkill -u "$(id -un)" -x xfwm4         2>/dev/null
+pkill -u "$(id -un)" -x xfce4-panel   2>/dev/null
+pkill -u "$(id -un)" -x xfdesktop     2>/dev/null
+pkill -u "$(id -un)" -x xfce4-session 2>/dev/null
+pkill -x Xorg 2>/dev/null
+rm -f /tmp/.X0-lock 2>/dev/null
+sleep 2
+exec /usr/libexec/phrog-greetd-session

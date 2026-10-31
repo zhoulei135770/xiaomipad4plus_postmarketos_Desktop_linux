@@ -1,0 +1,12 @@
+#!/bin/sh
+# Reload venus_core and show the diagnostic lines.
+P=147258
+M=/usr/lib/modules/7.0.14-sdm660/kernel/drivers/media/platform/qcom/venus
+
+rmmod venus_enc venus_dec venus_core 2>/dev/null
+dmesg -c > /dev/null 2>&1
+modprobe venus_core 2>/dev/null
+sleep 9
+dmesg | grep -E 'diag:|venus' | tail -18
+echo "--- venus irq ---"
+grep -i venus /proc/interrupts | head -1 || echo "(none)"

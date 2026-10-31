@@ -1,0 +1,52 @@
+#!/bin/sh
+# pad_gps.sh - talk to the sd660 GNSS engine through the QMI LOC service.
+#
+# The GNSS receiver lives in the modem, not in a Linux driver: there is no
+# /dev/gnss and no memshare in mainline.  What works is the Location service
+# (QMI service 16) exported over QRTR at node 0, which qmicli can drive.
+#
+#   pad_gps state      engine mode, lock and XTRA source (always works)
+#   pad_gps track [s]  start a session and follow position reports
+#   pad_gps nmea  [s]  start a session and follow raw NMEA sentences
+#   pad_gps sv    [s]  start a session and follow satellite info
+#
+DEV=${PAD_GPS_DEV:-qrtr://0}
+
+state() {
+	echo "=== operation mode ==="
+	timeout 20 qmicli -d "$DEV" --loc-get-operation-mode 2>&1 | head -3
+	echo "=== engine lock ==="
+	timeout 20 qmicli -d "$DEV" --loc-get-engine-lock 2>&1 | head -3
+	echo "=== NMEA types ==="
+	timeout 20 qmicli -d "$DEV" --loc-get-nmea-types 2>&1 | head -3
+}
+
+start() {
+	timeout 20 qmicli -d "$DEV" --loc-start --client-no-release-cid 2>&1 | head -3
+}
+
+case "$1" in
+state|"")
+	state
+	;;
+track)
+	start
+	echo "=== following position reports (${2:-30}s) ==="
+	timeout "${2:-30}" qmicli -d "$DEV" --loc-follow-position-report 2>&1 | head -30
+	;;
+nmea)
+	start
+	timeout 20 qmicli -d "$DEV" "--loc-set-nmea-types=gga|gsa|gsv|rmc" >/dev/null 2>&1
+	echo "=== following NMEA (${2:-30}s) ==="
+	timeout "${2:-30}" qmicli -d "$DEV" --loc-follow-nmea 2>&1 | head -40
+	;;
+sv)
+	start
+	echo "=== following satellite info (${2:-30}s) ==="
+	timeout "${2:-30}" qmicli -d "$DEV" --loc-follow-gnss-sv-info 2>&1 | head -40
+	;;
+*)
+	echo "usage: pad_gps {state|track [s]|nmea [s]|sv [s]}"
+	exit 1
+	;;
+esac

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""tablet-fingerprint-gui - enroll / verify a fingerprint on the Mi Pad 4 Plus.
+
+The real work happens in /usr/local/lib/fingerprint.py (fpc1020 sysfs driver +
+fixed-pattern-noise subtraction).  This window only drives it and shows what to
+do with a finger, which is a lot friendlier on a 10" tablet than a terminal.
+
+Runs unprivileged: a udev rule hands the fpc1020 sysfs attributes to the
+"fingerprint" group.
+"""
+import os
+import queue
+import subprocess
+import sys
+import threading
+import tkinter as tk
+from tkinter import font as tkfont
+from tkinter import messagebox
+
+FP = "/usr/local/lib/fingerprint.py"
+HELPER = "/usr/local/bin/fp-helper"     # root: touches /sys + /var/lib/fingerprint
+USER = os.environ.get("SUDO_USER") or os.environ.get("USER") or "zhoulei"
+
+BG = "#12161c"
+FG = "#e8eef5"
+ACCENT = "#3aa0ff"
+GOOD = "#38c172"
+BAD = "#e3342f"
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("指纹")
+        self.configure(bg=BG)
+        self.attributes("-fullscreen", "--windowed" not in sys.argv)
+        self.q = queue.Queue()
+        self.busy = False
+
+        big = tkfont.Font(family="Sans", size=26, weight="bold")
+        mid = tkfont.Font(family="Sans", size=17)
+        small = tkfont.Font(family="Monospace", size=11)
+
+        self.status = tk.Label(self, text="准备就绪", bg=BG, fg=ACCENT, font=big)
+        self.status.pack(pady=(48, 12))
+
+        self.hint = tk.Label(self, text="点下面的按钮开始", bg=BG, fg=FG, font=mid)
+        self.hint.pack(pady=6)
+
+        self.log = tk.Text(self, height=7, bg="#0b0e12", fg=FG, font=small,
+                           relief="flat", wrap="word")
+        self.log.pack(fill="x", padx=40, pady=16)
+
+        row = tk.Frame(self, bg=BG)
+        row.pack(pady=12)
+        self.buttons = []
+        for text, cmd in (("录入指纹", self.enroll),
+                          ("验证指纹", self.verify),
+                          ("删除模板", self.delete),
+                          ("退出", self.destroy)):
+            b = tk.Button(row, text=text, font=mid, bg="#1d2733", fg=FG,
+                          activebackground=ACCENT, relief="flat",
+                          padx=22, pady=14, command=cmd)
+            b.pack(side="left", padx=10)
+            self.buttons.append(b)
+
+    # ---------- helpers ----------
+    def write(self, text):
+        self.log.insert("end", text)
+        self.log.see("end")
+
+    def set_busy(self, busy):
+        self.busy = busy
+        state = "disabled" if busy else "normal"
+        for b in self.buttons:
+            b.configure(state=state)
+
+    def run_fp(self, args, on_done):
+        """Run fingerprint.py in a thread and stream its output."""
+        def worker():
+            try:
+                proc = subprocess.Popen(["sudo", "-n", HELPER] + args,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        text=True, bufsize=1)
+                for line in proc.stdout:
+                    self.q.put(("log", line.rstrip()))
+                rc = proc.wait()
+            except Exception as exc:            # noqa: BLE001
+                self.q.put(("log", f"启动失败: {exc}"))
+                rc = 1
+            self.q.put(("done", (rc, on_done)))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def pump(self):
+        try:
+            while True:
+                kind, payload = self.q.get_nowait()
+                if kind == "log":
+                    self.write(payload + "\n")
+                elif kind == "done":
+                    rc, cb = payload
+                    self.set_busy(False)
+                    cb(rc)
+        except queue.Empty:
+            pass
+        self.after(120, self.pump)
+
+    # ---------- actions ----------
+    def enroll(self):
+        if self.busy:
+            return
+        if not os.path.exists(f"{FP}"):
+            messagebox.showerror("缺少文件", f"{FP} 不存在")
+            return
+        self.set_busy(True)
+        self.log.delete("1.0", "end")
+        self.status.configure(text="正在录入…", fg=ACCENT)
+        self.hint.configure(text="先把手指移开 1 秒（暗帧），然后抬起再按 3 次")
+        self.run_fp(["enroll", USER], self.enroll_done)
+
+    def enroll_done(self, rc):
+        if rc == 0:
+            self.status.configure(text="录入成功", fg=GOOD)
+            self.hint.configure(text="现在可以点“验证指纹”试一下")
+        else:
+            self.status.configure(text="录入失败", fg=BAD)
+            self.hint.configure(text="看下面的日志（常见原因：手指没按稳 / 提前抬起）")
+
+    def verify(self):
+        if self.busy:
+            return
+        self.set_busy(True)
+        self.log.delete("1.0", "end")
+        self.status.configure(text="请按指纹…", fg=ACCENT)
+        self.hint.configure(text="把已录入的手指按在传感器上")
+        self.run_fp(["verify", USER], self.verify_done)
+
+    def verify_done(self, rc):
+        if rc == 0:
+            self.status.configure(text="✓ 验证通过", fg=GOOD)
+        else:
+            self.status.configure(text="✗ 不匹配", fg=BAD)
+        self.hint.configure(text="可以再点一次验证")
+
+    def delete(self):
+        name = USER
+        if not messagebox.askyesno("删除模板", f"删除 {name} 的指纹模板？"):
+            return
+        cmd = [sys.executable, FP, "enroll"]
+        # templates live next to the matcher; remove via the same module
+        try:
+            import glob
+            hits = glob.glob(f"/usr/local/lib/fp-templates/*{name}*") + \
+                   glob.glob(os.path.expanduser(f"~/.local/share/tablet-fp/*{name}*"))
+            if not hits:
+                self.status.configure(text="没有找到模板", fg=ACCENT)
+                return
+            for h in hits:
+                os.unlink(h)
+            self.status.configure(text="模板已删除", fg=GOOD)
+            self.hint.configure(text="可以先“录入指纹”再验证")
+        except Exception as exc:                # noqa: BLE001
+            messagebox.showerror("删除失败", str(exc))
+
+
+if __name__ == "__main__":
+    app = App()
+    app.pump()
+    app.mainloop()

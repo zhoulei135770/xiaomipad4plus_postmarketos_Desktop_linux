@@ -1,0 +1,54 @@
+#!/bin/sh
+# Capture one fingerprint frame and report whether it contains ridge structure.
+#
+#   pad_fp_check [outfile]
+#
+# The driver now uses the vendor trustlet's capture setup: register 0x68 is
+# written as NINE bytes, IMG_CAPT_SIZE is [0, 8, 0, 0xB0] (64x176) and the frame
+# is 11266 bytes.  Press and hold a finger when prompted.
+OUT=${1:-/tmp/finger.bin}
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+if [ ! -e "$D/image" ]; then
+	echo "fpc1020 not bound to $D"
+	exit 1
+fi
+
+LEN=$(cat "$P/read_len" 2>/dev/null)
+[ -z "$LEN" ] && LEN=11266
+
+echo "=== sensor ==="
+echo "r fc 4" > "$D/cmd" 2>/dev/null
+sleep 1
+dmesg | grep -i "fpc1020.*0xfc" | tail -1 | sed 's/^/  /'
+echo "  capture size: $(cat $P/img_capt_size)   read len: $LEN"
+
+echo "=== press and hold your finger on the sensor now ==="
+dmesg -c >/dev/null 2>&1
+echo 1 > "$D/capture"
+sleep 1
+dmesg | grep -i "fpc1020.*capt" | tail -1 | sed 's/^/  driver: /'
+
+dd if="$D/image" of="$OUT" bs=1 count="$LEN" 2>/dev/null
+echo "  saved $OUT ($(stat -c %s "$OUT" 2>/dev/null) bytes)"
+
+python3 - "$OUT" <<'EOF'
+import sys
+try:
+    d = open(sys.argv[1], 'rb').read()
+except OSError:
+    print("  no frame"); raise SystemExit
+if len(d) < 64:
+    print("  no frame"); raise SystemExit
+d = d[1:]                      # first byte is the protocol dummy
+m = sum(d) / len(d)
+sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+print(f"  mean {m:6.1f}   sd {sd:6.2f}   distinct {len(set(d))}")
+if sd > 10:
+    print("  ==> RIDGES CAPTURED")
+elif sd > 3:
+    print("  ==> weak structure, press harder / adjust position")
+else:
+    print("  ==> flat field (no ridge detail)")
+EOF

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Control the PM660L SMB2 OTG 5V boost (powers USB devices without a hub).
+ATTR=$(find /sys/devices -name otg_vbus 2>/dev/null | head -n1)
+CHG=/sys/class/power_supply/pm660-charger/online
+
+[ -n "$ATTR" ] || { echo "otg_vbus control not found (kernel too old?)" >&2; exit 1; }
+
+charger_online() { [ "$(cat "$CHG" 2>/dev/null)" = "1" ]; }
+
+case "$1" in
+  on)     echo 1 > "$ATTR" ;;
+  off)    echo 0 > "$ATTR" ;;
+  status)
+    echo "otg_vbus=$(cat "$ATTR" 2>/dev/null) charger_online=$(cat "$CHG" 2>/dev/null)"
+    ;;
+  auto)
+    if charger_online; then echo 0 > "$ATTR"; else echo 1 > "$ATTR"; fi
+    ;;
+  *)
+    echo "usage: tablet-otg on|off|status|auto" >&2
+    exit 2
+    ;;
+esac

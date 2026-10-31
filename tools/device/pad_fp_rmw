@@ -1,0 +1,72 @@
+#!/bin/sh
+# Apply the trustlet's read-modify-write sequence to the FPC1020.
+#
+# From the TA decompilation:
+#   0x94 (OSC_TRIM, 2 bytes): buf[1] = (buf[1] & 0xe0) | 7
+#   0xac (3 bytes)          : value |= 0x800000
+#   0xec (5 bytes)          : value |= 0xf0000000
+#   0xd8 (10 bytes)         : value |= 0x1f1f1f1f
+#
+# The cmd sysfs attribute only takes explicit byte values, so each step reads
+# the current bytes from dmesg and writes them back modified.
+D=/sys/bus/spi/devices/spi0.0
+
+read_reg() {   # read_reg <hexaddr> <len> -> prints bytes space separated
+	dmesg -c >/dev/null 2>&1
+	echo "r $1 $2" > "$D/cmd"
+	sleep 0.15
+	dmesg | grep "reg 0x$1 " | sed 's/.*= //' | tr -d '\n'
+}
+
+write_reg() {  # write_reg <hexaddr> <bytes...>
+	echo "w $*" > "$D/cmd"
+	sleep 0.15
+}
+
+echo "=== 0x94 OSC_TRIM: (high & 0xe0) | 7 ==="
+b=$(read_reg 94 2)
+echo "  before: $b"
+set -- $b
+hi=$(( 0x$2 & 0xe0 | 7 ))
+printf "  after : %s %02x\n" "$1" "$hi"
+write_reg 94 "$1" "$(printf '%02x' $hi)"
+
+echo "=== 0xac: |= 0x800000 ==="
+b=$(read_reg ac 3)
+echo "  before: $b"
+set -- $b
+hi=$(( 0x$3 | 0x80 ))
+write_reg ac "$1" "$2" "$(printf '%02x' $hi)"
+
+echo "=== 0xec: |= 0xf0000000 ==="
+b=$(read_reg ec 5)
+echo "  before: $b"
+set -- $b
+lo=$(( 0x$5 | 0xf0 ))
+write_reg ec "$1" "$2" "$3" "$4" "$(printf '%02x' $lo)"
+
+echo "=== 0xd8: |= 0x1f1f1f1f (4 middle bytes) ==="
+b=$(read_reg d8 10)
+echo "  before: $b"
+set -- $b
+b3=$(printf '%02x' $(( 0x$4 | 0x1f )))
+b4=$(printf '%02x' $(( 0x$5 | 0x1f )))
+b5=$(printf '%02x' $(( 0x$6 | 0x1f )))
+b6=$(printf '%02x' $(( 0x$7 | 0x1f )))
+write_reg d8 "$1" "$2" "$3" "$b3" "$b4" "$b5" "$b6" "$8" "$9" "${10}"
+
+echo "=== 0x40 MISO_EDGE_RIS_EN = 1 ==="
+write_reg 40 01
+
+echo "=== read back ==="
+for r in 94 ac ec d8 40; do
+	n=2
+	[ "$r" = "ac" ] && n=3
+	[ "$r" = "ec" ] && n=5
+	[ "$r" = "d8" ] && n=10
+	[ "$r" = "40" ] && n=1
+	dmesg -c >/dev/null 2>&1
+	echo "r $r $n" > "$D/cmd"
+	sleep 0.15
+	dmesg | grep "reg 0x$r " | sed 's/.*spi0.0: /  /'
+done

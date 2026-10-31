@@ -1,0 +1,26 @@
+#!/bin/sh
+# Inspect the CCI pin muxing and the front sensor node in the live DT.
+CCI=/proc/device-tree/soc@0/cci@ca0c000
+echo "=== cci node ==="
+ls "$CCI" 2>/dev/null
+echo
+echo "=== cci pinctrl-names ==="
+tr -d '\0' < "$CCI/pinctrl-names" 2>/dev/null; echo
+echo
+echo "=== i2c-bus@1 (master 1) children ==="
+ls "$CCI/i2c-bus@1/" 2>/dev/null
+echo
+echo "=== front sensor node? ==="
+for n in "$CCI/i2c-bus@1"/*/; do
+	comp=$(tr -d '\0' < "$n/compatible" 2>/dev/null)
+	echo "  $(basename "$n") compatible=$comp"
+	ls "$n" 2>/dev/null | head -12
+done 2>/dev/null
+echo
+echo "=== tlmm pinctrl: which gpios are muxed for cci ==="
+for st in /proc/device-tree/soc@0/*pinctrl*/cci*/ /proc/device-tree/soc@0/pinctrl*/ ; do
+	[ -d "$st" ] || continue
+	pins=$(tr -d '\0' < "$st/pins" 2>/dev/null | tr '\0' ' ')
+	fn=$(tr -d '\0' < "$st/function" 2>/dev/null)
+	[ -n "$pins" ] && echo "  $st pins=[$pins] function=$fn"
+done 2>/dev/null | head -20

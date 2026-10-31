@@ -1,0 +1,17 @@
+#!/bin/sh
+# Auto-rotate the tablet screen (Wayland/labwc) from the accelerometer.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/10000}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+monitor-sensor --accel 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+        *"orientation changed: normal"*)    t=0 ;;
+        *"orientation changed: left-up"*)   t=90 ;;
+        *"orientation changed: right-up"*)  t=270 ;;
+        *"orientation changed: bottom-up"*) t=180 ;;
+        *) continue ;;
+    esac
+    # Avoid redundant calls
+    cur=$(wlr-randr --output DSI-1 2>/dev/null | sed -n 's/.*Transform: //p' | head -1)
+    [ "$cur" = "$t" ] && continue
+    wlr-randr --output DSI-1 --transform "$t" >/dev/null 2>&1
+done

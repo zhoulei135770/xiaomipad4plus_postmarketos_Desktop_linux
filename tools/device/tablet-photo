@@ -1,0 +1,37 @@
+#!/bin/sh
+# Take one still with the rear camera (ov13855) as raw 10-bit Bayer.
+#
+#   tablet-photo [exposure] [analogue_gain] [digital_gain] [outfile]
+#
+# Defaults: max exposure, gain 4000 (bright, noisy) - there is no 3A yet, so
+# the values have to be chosen by hand.  Convert the result on a PC with
+# tools/raw10_to_png.py.
+D=/dev/media0
+SUB=/dev/v4l-subdev17
+OUT=${4:-/tmp/photo.raw}
+EXP=${1:-3206}
+AG=${2:-4000}
+DG=${3:-4096}
+
+# make sure the sensor is there and the pipeline is wired
+modprobe ov13855 2>/dev/null
+media-ctl -d $D -l '"msm_csiphy0":1->"msm_csid0":0[1]'    >/dev/null 2>&1
+media-ctl -d $D -l '"msm_csid0":1->"msm_vfe0_rdi0":0[1]' >/dev/null 2>&1
+for e in '"ov13855 3-0036":0' '"msm_csiphy0":0' '"msm_csiphy0":1' \
+         '"msm_csid0":0' '"msm_csid0":1' '"msm_vfe0_rdi0":0'; do
+	media-ctl -d $D -V "$e[fmt:SGRBG10_1X10/4224x3136]" >/dev/null 2>&1
+done
+
+v4l2-ctl -d $SUB --set-ctrl=test_pattern=0 >/dev/null 2>&1
+v4l2-ctl -d $SUB --set-ctrl=exposure=$EXP,analogue_gain=$AG,digital_gain=$DG >/dev/null 2>&1
+
+rm -f "$OUT"
+timeout 25 v4l2-ctl -d /dev/video0 --set-fmt-video=width=4224,height=3136,pixelformat=pgAA \
+	--stream-mmap --stream-count=1 --stream-to="$OUT" >/dev/null 2>&1
+if [ -s "$OUT" ]; then
+	echo "saved $OUT ($(stat -c %s "$OUT") bytes)"
+	echo "convert on a PC:  python tools/raw10_to_png.py $OUT out.png"
+else
+	echo "capture failed (try a reboot if the VFE got wedged)"
+	exit 1
+fi

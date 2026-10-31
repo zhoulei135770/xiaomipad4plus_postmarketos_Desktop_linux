@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""pad_imu.py - read the accelerometer / gyroscope / magnetometer via IIO.
+
+The sensor-manager drivers are buffer-only (no in_*_raw attributes), so a
+sample is taken by enabling the scan elements and reading the character
+device.  Layout (from scan_elements/*_index):
+
+    in_accel_x_index = 0   s32
+    in_accel_y_index = 1   s32
+    in_accel_z_index = 2   s32
+    in_timestamp_index = 3 s64   (aligned to 8 bytes -> offset 16)
+
+so one record is 24 bytes: 12 bytes of data, 4 bytes padding, 8 bytes timestamp.
+
+    sudo pad_imu.py accel [n]
+    sudo pad_imu.py gyro  [n]
+    sudo pad_imu.py mag   [n]
+"""
+import os
+import struct
+import sys
+import time
+
+IIO = "/sys/bus/iio/devices"
+REC = 24
+
+SENSORS = {
+    "accel": ("qcom-smgr-accel", "in_accel", "m/s^2"),
+    "gyro": ("qcom-smgr-gyro", "in_anglvel", "rad/s"),
+    "mag": ("qcom-smgr-mag", "in_magn", "gauss"),
+    "prox": ("qcom-smgr-prox", "in_proximity", ""),
+}
+
+
+def write(path, val):
+    with open(path, "w") as f:
+        f.write(str(val))
+
+
+def find(name):
+    for d in sorted(os.listdir(IIO)):
+        p = os.path.join(IIO, d)
+        try:
+            with open(os.path.join(p, "name")) as f:
+                if f.read().strip() == name:
+                    return p, d
+        except OSError:
+            continue
+    return None, None
+
+
+def scale_of(path, prefix):
+    try:
+        with open(os.path.join(path, prefix + "_scale")) as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def main():
+    which = sys.argv[1] if len(sys.argv) > 1 else "accel"
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    if which not in SENSORS:
+        print("usage: pad_imu.py {accel|gyro|mag|prox} [count]")
+        return 1
+
+    name, prefix, unit = SENSORS[which]
+    path, dev = find(name)
+    if not path:
+        print(f"no {name} device")
+        return 1
+
+    se = os.path.join(path, "scan_elements")
+    elems = [f"{prefix}_{a}_en" for a in ("x", "y", "z")]
+    elems = [e for e in elems if os.path.exists(os.path.join(se, e))]
+    if not elems:
+        print(f"no scan elements for {prefix} in {se}")
+        return 1
+    has_ts = os.path.exists(os.path.join(se, "in_timestamp_en"))
+    scale = scale_of(path, prefix)
+    print(f"{name}  channels={len(elems)}  scale={scale}  unit={unit}")
+
+    try:
+        write(os.path.join(path, "buffer", "enable"), 0)
+    except OSError:
+        pass
+    time.sleep(0.2)
+    for e in elems:
+        write(os.path.join(se, e), 1)
+    if has_ts:
+        write(os.path.join(se, "in_timestamp_en"), 1)
+    write(os.path.join(path, "buffer", "length"), max(n * 4, 8))
+    write(os.path.join(path, "buffer", "enable"), 1)
+    time.sleep(0.5)
+
+    fd = os.open(f"/dev/{dev}", os.O_RDONLY)
+    try:
+        for i in range(n):
+            data = os.read(fd, REC)
+            if len(data) < 16:
+                print("short read")
+                break
+            vals = struct.unpack_from("<" + "i" * len(elems), data, 0)
+            ts = struct.unpack_from("<q", data, 16)[0] if has_ts else 0
+            if scale:
+                conv = ", ".join(f"{v * scale:+.3f}" for v in vals)
+                print(f"  raw={vals}  ->  [{conv}] {unit}  ts={ts}")
+            else:
+                print(f"  raw={vals}  ts={ts}")
+            time.sleep(0.25)
+    finally:
+        os.close(fd)
+        try:
+            write(os.path.join(path, "buffer", "enable"), 0)
+            for e in elems:
+                write(os.path.join(se, e), 0)
+            if has_ts:
+                write(os.path.join(se, "in_timestamp_en"), 0)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

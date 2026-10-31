@@ -1,0 +1,17 @@
+#!/bin/sh
+# Monitor finger presence (0xd4) and calibration codes for N seconds.
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-60}
+LOG=/tmp/fpmon.log
+
+: > "$LOG"
+i=0
+while [ "$i" -lt "$N" ]; do
+	dmesg -c >/dev/null 2>&1
+	echo "r d4 2" > "$D/cmd"
+	sleep 0.3
+	v=$(dmesg | grep "reg 0xd4" | sed 's/.*= //')
+	echo "$i $v" >> "$LOG"
+	i=$((i + 1))
+done
+echo "DONE" >> "$LOG"

@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""tablet-charge-guard - keep forced fast charging inside safe limits.
+
+The smbx patch forces the USB input limit to 1.5 A and disables AICL, which is
+what makes the tablet charge at all.  Forcing current without watching the
+battery is exactly how cells get cooked, so this daemon steps the limit down as
+the battery warms up, and backs off near full.
+
+Battery temperature limits from the PMIC: temp_alert_max = 61 C, temp_max = 65 C
+(hardware protection).  We stay far below them.
+"""
+import os
+import subprocess
+import sys
+import time
+
+BAT = "/sys/class/power_supply/qcom-battery"
+CHG = "/sys/class/power_supply/pm660-charger"
+
+# (battery temp in C, input current limit in uA)
+STEPS = [
+    (48.0, 100000),
+    (45.0, 200000),
+    (42.0, 400000),
+    (38.0, 800000),
+    (0.0, 1500000),
+]
+TAPER_PCT = 95          # above this, charge gently
+TAPER_UA = 800000
+POLL = 20
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def set_icl(ua):
+    try:
+        with open(f"{CHG}/current_max", "w") as f:
+            f.write(str(int(ua)))
+    except OSError as exc:
+        log(f"cannot set icl {ua}: {exc}")
+
+
+def main():
+    if not os.path.exists(f"{CHG}/current_max"):
+        log("charger not present")
+        return 1
+
+    last = None
+    log("started: temp-aware input current guard")
+    while True:
+        raw_t = read(f"{BAT}/temp")
+        raw_c = read(f"{BAT}/capacity")
+        status = read(f"{BAT}/status", "?")
+        icl = read(f"{CHG}/current_max", "?")
+        if raw_t is None or raw_c is None:
+            time.sleep(POLL)
+            continue
+        temp = int(raw_t) / 10.0
+        cap = int(raw_c)
+
+        target = 1500000
+        for limit, ua in STEPS:
+            if temp >= limit:
+                target = ua
+                break
+        if cap >= TAPER_PCT and target > TAPER_UA:
+            target = TAPER_UA
+
+        if target != last:
+            set_icl(target)
+            log(f"temp={temp:.1f}C cap={cap}% status={status} "
+                f"icl={icl} -> {target} uA")
+            last = target
+
+        # hard safety: never keep 1.5 A above 45 C even if a write failed
+        if temp >= 46.0 and icl not in ("100000", "200000"):
+            set_icl(200000)
+            last = 200000
+            log(f"SAFETY: temp {temp:.1f}C -> forced 200 mA")
+
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

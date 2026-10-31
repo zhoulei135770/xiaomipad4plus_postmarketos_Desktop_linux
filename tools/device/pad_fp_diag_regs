@@ -1,0 +1,24 @@
+#!/bin/sh
+# After a capture, dump the diagnostic registers the trustlet reads when
+# status bit 2 is set (0x38 and 0x14), plus the other status registers.
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-8}
+
+dmesg -c >/dev/null 2>&1
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo "=== attempt $i ==="
+	echo 1 > "$D/capture"
+	sleep 1
+	dmesg | grep -E "status after read|captured|invalid|no finger" | tail -2
+
+	dmesg -c >/dev/null 2>&1
+	for r in 1c 38 14 24 00 04 08 10 18 20; do
+		printf 'r %s 4\n' "$r" > "$D/cmd" 2>/dev/null
+		sleep 0.15
+	done
+	dmesg | grep -E "reg 0x" | sed 's/.*fpc1020 spi0.0: //' | tr '\n' ' '
+	echo
+	i=$((i + 1))
+done
+echo "done"

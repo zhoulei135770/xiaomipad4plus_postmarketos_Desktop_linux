@@ -1,0 +1,37 @@
+#!/bin/sh
+# Pair a Bluetooth keyboard/mouse with the tablet.
+#
+#   tablet-bt-pair                 -> scan 30s and list devices
+#   tablet-bt-pair <MAC>           -> pair + trust + connect that MAC
+#   tablet-bt-pair <MAC> keyboard  -> also print the HID input device
+#
+# Put the keyboard/mouse into pairing mode first (usually hold the pairing
+# button until the LED blinks).
+set -u
+MAC="${1:-}"
+
+if [ -z "$MAC" ]; then
+    echo "Scanning for 30s — put the device in pairing mode now..."
+    bluetoothctl --timeout 30 scan on 2>/dev/null | grep -E 'NEW.*Device' | sort -u
+    echo
+    echo "Re-run with the address:  tablet-bt-pair AA:BB:CC:DD:EE:FF"
+    exit 0
+fi
+
+echo "Pairing $MAC ..."
+bluetoothctl <<EOF
+power on
+agent on
+default-agent
+pairable on
+pair $MAC
+trust $MAC
+connect $MAC
+EOF
+
+echo
+echo "--- result ---"
+bluetoothctl info "$MAC" 2>/dev/null | sed 's/^/  /'
+echo "--- HID input devices now present ---"
+grep -iE 'Name|Handlers' /proc/bus/input/devices 2>/dev/null | paste - - 2>/dev/null | \
+    grep -iE 'kbd|mouse|keyboard|mouse' | tail -6 | sed 's/^/  /'

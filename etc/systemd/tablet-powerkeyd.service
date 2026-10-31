@@ -1,0 +1,12 @@
+[Unit]
+Description=Power key handler (lock/blank / wake)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/tablet-powerkeyd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

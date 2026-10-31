@@ -1,0 +1,24 @@
+#!/bin/sh
+# Wait-for-finger capture test: exercises the vendor finger-presence sequence
+# (0x20 FINGER_PRESENT_QUERY -> 0x28 ACTIVATE_SLEEP_MODE -> IRQ) that r251
+# installs, using the trustlet's geometry (0x4000B000, 11264 bytes).
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-4}
+
+dmesg -c >/dev/null 2>&1
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo "=== attempt $i ===" >> /tmp/fpcapture.log
+	echo 1 > "$D/capture" 2>/dev/null
+	sleep 1
+	i=$((i + 1))
+done
+
+{
+	echo "=== dmesg ==="
+	dmesg | grep -E "finger query|no finger|captured|status|frame|wake" | tail -30
+	echo "=== registers ==="
+	for r in 1c 38 14 24; do echo "r $r 1" > "$D/cmd"; sleep 0.2; done
+	sleep 1
+	dmesg | grep -E "reg 0x" | sed "s/.*spi0.0: //" | tail -8
+} >> /tmp/fpcapture.log 2>&1

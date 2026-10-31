@@ -1,0 +1,36 @@
+#!/bin/sh
+# Dump every register of the fingerprint sensor and print a compact table.
+#
+#   sudo pad_fp_regs          # non-zero registers only
+#   sudo pad_fp_regs all      # every register
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+[ -e "$D/image" ] || { echo "fpc1020 not bound"; exit 1; }
+
+# make sure the vendor configuration is in place
+echo 0 > "$P/skip_config" 2>/dev/null
+echo 1 > "$D/capture_now" 2>/dev/null
+sleep 1
+
+all=${1:-}
+
+reg=0
+while [ "$reg" -le 255 ]; do
+	h=$(printf '%02x' "$reg")
+	dmesg -c > /dev/null 2>&1
+	printf 'r %s 4\n' "$h" > "$D/cmd"
+	sleep 0.08
+	got=$(dmesg | sed -n "s/.*fpc1020 spi0.0: reg 0x$h = //p" | tail -1)
+	if [ -n "$got" ]; then
+		case "$got" in
+		"00 00 00 00")
+			[ -n "$all" ] && echo "0x$h  $got"
+			;;
+		*)
+			echo "0x$h  $got"
+			;;
+		esac
+	fi
+	reg=$((reg + 1))
+done | awk 'BEGIN{printf "%-6s %s\n","REG","VALUE"} {print}'

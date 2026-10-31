@@ -1,0 +1,18 @@
+[Unit]
+Description=Tablet auto-rotation from accelerometer
+After=graphical.target iio-sensor-proxy.service
+Wants=iio-sensor-proxy.service
+
+[Service]
+Type=simple
+# root: needed for /sys/bus/iio/devices/iio:device2/buffer/enable
+User=root
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/zhoulei/.Xauthority
+Environment=HOME=/root
+ExecStart=/usr/local/bin/tablet-autorotate
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

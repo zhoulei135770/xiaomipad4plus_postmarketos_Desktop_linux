@@ -1,0 +1,5 @@
+#!/bin/sh
+# 面板按钮调用：切换方向并弹通知说明当前方向
+export DISPLAY=:0
+export XAUTHORITY=/home/zhoulei/.Xauthority
+exec /usr/local/bin/tablet-rotate cycle

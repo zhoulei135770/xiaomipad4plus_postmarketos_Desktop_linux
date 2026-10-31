@@ -1,0 +1,26 @@
+#!/bin/sh
+# Try to pin the video AXI clock rate through the clk debugfs and reload venus.
+# Avoids a boot flash while testing the hypothesis that video_axi_clk at 0 Hz
+# prevents the venus core from reaching DDR.
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+C=/sys/kernel/debug/clk
+
+for clk in video_axi_clk throttle_video_axi_clk axi_clk_src; do
+	[ -e "$C/$clk/rate" ] || { echo "$clk: missing"; continue; }
+	echo "$clk: before=$(cat $C/$clk/rate)"
+	echo 384000000 > "$C/$clk/rate" 2>/dev/null || \
+		echo "  (rate not writable)"
+	echo "  after=$(cat $C/$clk/rate)"
+done
+
+echo "--- reload venus ---"
+rmmod venus_enc venus_dec venus_core 2>/dev/null
+dmesg -c > /dev/null 2>&1
+modprobe venus_core 2>/dev/null
+sleep 9
+dmesg | grep -E 'diag:|venus' | tail -12
+
+echo "--- clk after probe ---"
+for clk in video_axi_clk throttle_video_axi_clk; do
+	[ -e "$C/$clk/rate" ] && echo "$clk: $(cat $C/$clk/rate)"
+done

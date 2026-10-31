@@ -1,0 +1,29 @@
+#!/bin/sh
+# Repeatedly trigger a real capture (waits for the finger IRQ) and report what
+# the driver logged, so a finger pressed at any time during the window lands.
+D=/sys/bus/spi/devices/spi0.0
+N=${1:-6}
+
+dmesg -c >/dev/null 2>&1
+i=0
+while [ "$i" -lt "$N" ]; do
+	echo "--- attempt $i (waiting for finger, 15 s) ---"
+	echo 1 > "$D/capture"
+	sleep 1
+	dmesg | grep -iE "status after read|captured|invalid|no finger|calibration" | tail -4
+	dd if="$D/image" of="/tmp/cap_$i.bin" bs=1 count=11266 2>/dev/null
+	python3 - "/tmp/cap_$i.bin" "$i" <<'EOF'
+import sys
+try:
+    d = open(sys.argv[1], 'rb').read()[2:]
+except OSError:
+    print("  (no frame)"); raise SystemExit
+if len(d) < 1000:
+    print("  (short frame)"); raise SystemExit
+m = sum(d) / len(d)
+sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+print("  frame %s: mean %.1f sd %.2f uniq %d" % (sys.argv[2], m, sd, len(set(d))))
+EOF
+	i=$((i + 1))
+done
+echo "loop done"

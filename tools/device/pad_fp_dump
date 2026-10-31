@@ -1,0 +1,71 @@
+#!/bin/sh
+# Dump every register the vendor trustlet writes, and compare with the values
+# recovered from its decompilation.  Run this after the driver has applied its
+# configuration (i.e. after any capture), so a mismatch pinpoints exactly which
+# write did not stick.
+#
+#   sudo pad_fp_dump            # config is applied first, then the dump
+#   sudo pad_fp_dump --no-apply # dump the current state only
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+[ -e "$D/image" ] || { echo "fpc1020 not bound"; exit 1; }
+
+if [ "$1" != "--no-apply" ]; then
+	echo "applying the driver configuration (one capture)..."
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 1
+fi
+
+# expected values recovered from the trustlet (FUN_0006fedc / FUN_0006e5b4 /
+# FUN_0004f2a4 capture path, sensor revision 3)
+expect() {
+	case "$1" in
+	54) echo "00 08 00 b0" ;;
+	5c) echo "03" ;;
+	8c) echo "14" ;;
+	78) echo "00 00" ;;
+	a0) echo "00 00" ;;
+	a8) echo "0f 0a" ;;
+	6c) echo "0a" ;;
+	90) echo "3f 3f 3f 3f 00 00 00 00" ;;
+	68) echo "01 3f 3f 3f 14 14 14 14 14" ;;
+	*)  echo "" ;;
+	esac
+}
+
+len() {
+	case "$1" in
+	54) echo 4 ;; 5c) echo 1 ;; 8c) echo 1 ;; 78) echo 2 ;;
+	a0) echo 2 ;; a8) echo 2 ;; 6c) echo 1 ;; 90) echo 8 ;; 68) echo 9 ;;
+	esac
+}
+
+printf "%-6s %-34s %-34s %s\n" REG EXPECTED ACTUAL RESULT
+for r in 54 5c 8c 78 a0 a8 6c 90 68; do
+	n=$(len $r)
+	dmesg -c > /dev/null 2>&1
+	printf 'r %s %s\n' "$r" "$n" > "$D/cmd"
+	sleep 0.15
+	got=$(dmesg | sed -n "s/.*fpc1020 spi0.0: reg 0x$r = //p" | tail -1)
+	if [ -z "$got" ]; then
+		got="(no read)"
+	fi
+	exp=$(expect $r)
+	if [ "$got" = "$exp" ]; then res="ok"; else res="MISMATCH"; fi
+	printf "0x%-4s %-34s %-34s %s\n" "$r" "$exp" "$got" "$res"
+done
+
+echo
+echo "sensor id:"
+dmesg -c > /dev/null 2>&1
+printf 'r fc 4\n' > "$D/cmd"
+sleep 0.15
+dmesg | grep "reg 0xfc" | tail -1 | sed 's/^/  /'
+
+echo
+echo "status (0x1c bit0=finger down, bit2=error, bit5=fifo, bit7=cmd done):"
+dmesg -c > /dev/null 2>&1
+printf 'r 1c 1\n' > "$D/cmd"
+sleep 0.15
+dmesg | grep "reg 0x1c" | tail -1 | sed 's/^/  /'

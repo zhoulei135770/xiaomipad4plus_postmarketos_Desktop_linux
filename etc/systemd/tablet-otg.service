@@ -1,0 +1,14 @@
+[Unit]
+Description=Enable OTG 5V boost when running on battery
+After=systemd-modules-load.service multi-user.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# the SPMI charger can probe late; wait up to 10 s for it
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 20 ]; do [ -e /sys/class/power_supply/pm660-charger ] && exit 0; i=$((i+1)); sleep 0.5; done; exit 1'
+ExecStart=/usr/local/bin/tablet-otg auto
+
+[Install]
+WantedBy=multi-user.target

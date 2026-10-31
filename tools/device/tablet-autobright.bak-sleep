@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""tablet-autobright - ambient-light-driven backlight daemon for Mi Pad 4 Plus.
+
+WHY THIS EXISTS
+---------------
+The kernel's qcom_smgr prox driver exposes the CM3232 ambient light sensor as
+IIO_PROXIMITY (in_proximity_*) rather than IIO_INTENSITY (in_intensity_*).
+iio-sensor-proxy therefore reports "No ambient light sensor", so XFCE's
+automatic brightness cannot work. This daemon reads the IIO buffer directly.
+
+HARDWARE REALITY (measured, 2026-10-24)
+---------------------------------------
+The CM3232 reports only a FEW DISCRETE values because the DSP switches gain
+ranges internally. Over 15 s of sampling in a lit room we saw exactly:
+
+    raw=     0  (   0.00 lx)   x1     <- transient / dark frame
+    raw= 29622  (  29.62 lx)   x74    <- dominant indoor range
+    raw= 94372  (  94.37 lx)   x5
+
+Ratio 94372/29622 = 3.19, i.e. a ~3.2x gain step, not continuous lux.
+
+Consequences for the control law:
+  * A naive "map lux to brightness" curve produces only 3 brightness levels,
+    which the user perceives as either "nothing happens" or "random jumps".
+  * Single 0-lx frames must be rejected as noise.
+  * Smoothing must be over a long window (~10 s), not 2 s.
+
+DESIGN
+------
+* Robust aggregation: collect samples, drop zeros, take the MODE (most common
+  value) rather than the median - the mode tracks the dominant gain range.
+* Wide, slow smoothing: EMA with a long time constant so single range-switches
+  do not move the screen.
+* A curve tuned for indoor use (LUX_MAX = 200 lx, not 800).
+* Large deadband (12% of full range) and a rate limit.
+
+Usage:
+    tablet-autobright --selftest      # verify the mapping math, no hardware
+    tablet-autobright --dry-run       # log decisions, never touch backlight
+    tablet-autobright --once          # single adjustment then exit
+    tablet-autobright --verbose       # daemon, log every decision
+    tablet-autobright                 # daemon
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import glob
+import math
+import os
+import select
+import signal
+import struct
+import sys
+import time
+
+BACKLIGHT = "/sys/class/backlight/lcd-backlight/brightness"
+MAXB = "/sys/class/backlight/lcd-backlight/max_brightness"
+
+# --- sampling ---
+POLL_S = 0.2              # select() timeout
+WINDOW_S = 6.0            # gather this long before deciding
+SAMPLE_TARGET = 40        # or this many samples, whichever comes first
+
+# --- robustness ---
+ZERO_REJECT = 1           # raw==0 frames seen <= this many -> ignore them
+MODE_MIN_COUNT = 3        # need this many agreeing samples for a valid mode
+
+# --- brightness curve (tuned for indoor tablet use) ---
+LUX_MIN = 1.0             # below 1 lx: minimum
+LUX_MAX = 200.0           # above 200 lx: maximum  (indoor ceiling ~200-300)
+FRAC_MIN = 0.15           # never fully dark
+FRAC_MAX = 1.00
+
+# --- stability ---
+DEADBAND = 0.25           # 25% of full range must change before we act
+MIN_INTERVAL = 20.0       # seconds between writes (anti-flicker)
+EMA_ALPHA = 0.20          # slower smoothing, fewer visible steps
+DIM_EXTRA_DELAY = 4.0     # be slower to dim
+
+_stop = False
+
+
+def _on_signal(signum, frame):
+    global _stop
+    _stop = True
+
+
+def find_als():
+    """Locate the ALS IIO device (driver exposes it as qcom-smgr-prox)."""
+    for dev in sorted(glob.glob("/sys/bus/iio/devices/iio:device*")):
+        try:
+            name = open(os.path.join(dev, "name")).read().strip()
+        except OSError:
+            continue
+        if "prox" not in name:
+            continue
+        idx = os.path.basename(dev).replace("iio:device", "")
+        return dev, f"/dev/iio:device{idx}", "<iIq", 16
+    return None
+
+
+def get_attr(path, default=None):
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return default
+
+
+def enable_buffer(dev) -> bool:
+    try:
+        se = os.path.join(dev, "scan_elements")
+        for ch in ("in_proximity_en", "in_timestamp_en"):
+            p = os.path.join(se, ch)
+            if os.path.exists(p):
+                open(p, "w").write("1")
+        p = os.path.join(dev, "buffer/length")
+        if os.path.exists(p):
+            open(p, "w").write("32")
+        p = os.path.join(dev, "buffer/watermark")
+        if os.path.exists(p):
+            open(p, "w").write("1")
+        open(os.path.join(dev, "buffer/enable"), "w").write("1")
+        return True
+    except OSError as e:
+        print(f"tablet-autobright: cannot enable buffer: {e}", file=sys.stderr)
+        return False
+
+
+def disable_buffer(dev):
+    try:
+        open(os.path.join(dev, "buffer/enable"), "w").write("0")
+    except OSError:
+        pass
+
+
+def collect(chardev, layout, rec, duration=WINDOW_S, target=SAMPLE_TARGET):
+    """Gather raw mlux samples for up to `duration` seconds."""
+    try:
+        fd = os.open(chardev, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return []
+    out, buf = [], b""
+    deadline = time.monotonic() + duration
+    try:
+        while time.monotonic() < deadline and len(out) < target:
+            r, _, _ = select.select([fd], [], [], POLL_S)
+            if not r:
+                continue
+            try:
+                buf += os.read(fd, 8192)
+            except BlockingIOError:
+                continue
+            while len(buf) >= rec:
+                chunk, buf = buf[:rec], buf[rec:]
+                out.append(struct.unpack(layout, chunk)[0])
+    finally:
+        os.close(fd)
+    return out
+
+
+def robust_mlux(samples) -> tuple[int | None, str]:
+    """Turn a sample list into a stable mlux reading.
+
+    Strategy (validated against real hardware behaviour):
+      1. discard raw==0 (transient dark frames)
+      2. take the MODE - the dominant gain range - not the median,
+         because 1 bright gain-step sample would skew a median
+      3. require MODE_MIN_COUNT agreement
+    """
+    if not samples:
+        return None, "no samples"
+    zeros = sum(1 for s in samples if s == 0)
+    nonzero = [s for s in samples if s != 0]
+    if not nonzero:
+        return 0, "all zero"
+    c = collections.Counter(nonzero)
+    mode, cnt = c.most_common(1)[0]
+    if cnt < MODE_MIN_COUNT:
+        # fall back to the mean of the middle half
+        s = sorted(nonzero)
+        lo, hi = len(s) // 4, max(len(s) // 4 + 1, len(s) * 3 // 4)
+        mid = s[lo:hi]
+        return sum(mid) // len(mid), f"mean-of-middle (mode had {cnt})"
+    detail = f"mode={mode} x{cnt}/{len(nonzero)}"
+    if zeros:
+        detail += f", {zeros} zero-frames dropped"
+    return mode, detail
+
+
+def lux_to_frac(lux: float) -> float:
+    if lux <= LUX_MIN:
+        return FRAC_MIN
+    if lux >= LUX_MAX:
+        return FRAC_MAX
+    t = (math.log(lux) - math.log(LUX_MIN)) / (math.log(LUX_MAX) - math.log(LUX_MIN))
+    return FRAC_MIN + t * (FRAC_MAX - FRAC_MIN)
+
+
+def read_int(path, default=0):
+    try:
+        return int(open(path).read().strip())
+    except (OSError, ValueError):
+        return default
+
+
+class Controller:
+    def __init__(self, dry_run=False, verbose=False):
+        self.dry_run = dry_run
+        self.verbose = verbose
+        self.maxb = read_int(MAXB, 255)
+        self.ema = None
+        self.last_write = 0.0
+        self.last_target = None
+        self.dim_since = None
+
+    def current(self):
+        return read_int(BACKLIGHT, self.maxb // 2)
+
+    def smooth(self, frac: float) -> float:
+        if self.ema is None:
+            self.ema = frac
+        else:
+            self.ema = self.ema * (1 - EMA_ALPHA) + frac * EMA_ALPHA
+        return self.ema
+
+    def decide(self, lux: float, now: float):
+        """Return (target or None, reason)."""
+        frac = self.smooth(lux_to_frac(lux))
+        target = max(1, min(self.maxb, int(round(frac * self.maxb))))
+        cur = self.current()
+        span = (self.maxb - 1) or 1
+
+        if self.last_target is None:
+            return target, "initial"
+
+        if abs(target - cur) / span < DEADBAND:
+            self.dim_since = None
+            return None, f"within deadband (target {target}, cur {cur})"
+
+        if now - self.last_write < MIN_INTERVAL:
+            return None, "rate limited"
+
+        if target < cur:
+            if self.dim_since is None:
+                self.dim_since = now
+                return None, "dim pending"
+            if now - self.dim_since < DIM_EXTRA_DELAY:
+                return None, "dim delay"
+        else:
+            self.dim_since = None
+
+        return target, "apply"
+
+    def write(self, target: int, now: float):
+        if self.dry_run:
+            print(f"[dry-run] {self.current()} -> {target}", flush=True)
+        else:
+            try:
+                open(BACKLIGHT, "w").write(str(target))
+            except OSError as e:
+                print(f"tablet-autobright: write failed: {e}", file=sys.stderr)
+                return False
+        self.last_write = now
+        self.last_target = target
+        self.dim_since = None
+        return True
+
+
+def selftest() -> int:
+    ok = total = 0
+
+    def check(label, cond, extra=""):
+        nonlocal ok, total
+        total += 1
+        if cond:
+            ok += 1
+        print(f"  {'ok ' if cond else 'FAIL'} {label}{('  ' + extra) if extra else ''}")
+
+    print("== curve ==")
+    for lux, expect in ((0.5, FRAC_MIN), (1.0, FRAC_MIN), (200.0, FRAC_MAX),
+                        (5000.0, FRAC_MAX)):
+        f = lux_to_frac(lux)
+        check(f"{lux} lx -> {f:.3f}", abs(f - expect) < 1e-6)
+
+    prev = -1.0
+    mono = True
+    for i in range(0, 2001):
+        f = lux_to_frac(i * 0.5)
+        if f < prev - 1e-9:
+            mono = False
+            break
+        prev = f
+    check("monotonic 0..1000 lx", mono)
+
+    inb = all(FRAC_MIN - 1e-9 <= lux_to_frac(x) <= FRAC_MAX + 1e-9
+              for x in (0, 1, 50, 200, 1e6))
+    check("within bounds", inb)
+
+    print("\n== the 3 real hardware values ==")
+    for raw, want_lo, want_hi in ((0, 1, 60), (29622, 30, 255), (94372, 100, 255)):
+        lux = raw / 1000.0
+        b = max(1, min(255, round(lux_to_frac(lux) * 255)))
+        check(f"raw={raw} ({lux:.1f} lx) -> {b}", want_lo <= b <= want_hi,
+              f"[{want_lo},{want_hi}]")
+    b0 = max(1, min(255, round(lux_to_frac(0.0) * 255)))
+    b29 = max(1, min(255, round(lux_to_frac(29.622) * 255)))
+    b94 = max(1, min(255, round(lux_to_frac(94.372) * 255)))
+    print(f"     -> the three levels are {b0} / {b29} / {b94}")
+    check("3 real levels are distinguishable (>=15 apart)",
+          min(abs(b29 - b0), abs(b94 - b29)) >= 15,
+          f"gaps {abs(b29-b0)}, {abs(b94-b29)}")
+
+    print("\n== robust aggregation ==")
+    v, d = robust_mlux([29622] * 20 + [94372] * 2 + [0])
+    check("mode wins over bright outliers", v == 29622, d)
+    v, d = robust_mlux([0, 0, 0, 29622])
+    check("zeros dropped", v == 29622, d)
+    v, d = robust_mlux([94372] * 25)
+    check("uniform bright", v == 94372, d)
+    v, d = robust_mlux([])
+    check("empty -> None", v is None, d)
+    v, d = robust_mlux([0] * 10)
+    check("all zero -> 0", v == 0, d)
+    v, d = robust_mlux([100, 200, 300])  # no clear mode
+    check("no mode -> middle mean", v is not None and 100 <= v <= 300, d)
+
+    print("\n== smoothing ==")
+    c = Controller(dry_run=True)
+    a = c.smooth(1.0)
+    b = c.smooth(0.0)
+    check("EMA moves gradually", 0.0 < b < 1.0, f"{a:.2f} -> {b:.2f}")
+    c2 = Controller(dry_run=True)
+    for _ in range(40):
+        c2.smooth(0.0)
+    check("EMA converges to new value", abs(c2.ema - 0.0) < 0.01, f"{c2.ema:.4f}")
+
+    print(f"\n{ok}/{total} passed")
+    return 0 if ok == total else 1
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.selftest:
+        return selftest()
+
+    als = find_als()
+    if not als:
+        print("tablet-autobright: no ambient light sensor found", file=sys.stderr)
+        return 2
+    dev, chardev, layout, rec = als
+    print(f"tablet-autobright: ALS {dev} ({chardev})", flush=True)
+
+    if not enable_buffer(dev):
+        return 3
+
+    ctl = Controller(dry_run=args.dry_run, verbose=args.verbose)
+    print(f"tablet-autobright: backlight {ctl.current()}/{ctl.maxb}, "
+          f"curve {LUX_MIN}-{LUX_MAX} lx -> {FRAC_MIN:.0%}-{FRAC_MAX:.0%}",
+          flush=True)
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    verbose = args.verbose or args.dry_run
+    try:
+        rounds = 0
+        while not _stop:
+            samples = collect(chardev, layout, rec,
+                              duration=WINDOW_S if not args.once else 3.0)
+            mlux, detail = robust_mlux(samples)
+            if mlux is None:
+                if verbose:
+                    print(f"  [{rounds}] no samples", flush=True)
+                time.sleep(1.0)
+                continue
+            lux = mlux / 1000.0
+            now = time.monotonic()
+            target, reason = ctl.decide(lux, now)
+
+            if args.once:
+                tgt = target if target is not None else ctl.current()
+                print(f"  {mlux} mlux = {lux:.2f} lx -> brightness {tgt} "
+                      f"({detail})")
+                if not args.dry_run:
+                    try:
+                        open(BACKLIGHT, "w").write(str(tgt))
+                    except OSError as e:
+                        print(f"write failed: {e}", file=sys.stderr)
+                        return 5
+                return 0
+
+            if target is not None:
+                if ctl.write(target, now):
+                    print(f"  {lux:7.2f} lx -> {target}/{ctl.maxb} "
+                          f"({detail})", flush=True)
+            elif verbose and rounds % 3 == 0:
+                print(f"  [{lux:7.2f} lx] {reason}; {detail}", flush=True)
+            rounds += 1
+    except KeyboardInterrupt:
+        pass
+    finally:
+        disable_buffer(dev)
+        print("tablet-autobright: stopped, buffer released", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

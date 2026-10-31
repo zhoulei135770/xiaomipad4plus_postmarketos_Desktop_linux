@@ -1,0 +1,12 @@
+#!/bin/sh
+# Show the video clock tree with parents, to find why video_axi_clk has rate 0.
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+F=/sys/kernel/debug/clk/clk_summary
+[ -r "$F" ] || { echo "no clk_summary"; exit 1; }
+echo "== header =="
+head -1 "$F"
+echo "== video_axi_clk context =="
+grep -n -B4 -A4 "video_axi_clk" "$F" | head -30
+echo
+echo "== all axi clocks =="
+grep -i "axi" "$F" | head -20

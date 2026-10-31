@@ -1,0 +1,36 @@
+#!/bin/sh
+# Sweep one fpc1020 module parameter, capture a frame for each value and report
+# the frame statistics.  Useful to see whether a setting changes the signal.
+#
+#   sudo pad_fp_sweep <param> <value1> [value2 ...]
+#
+# Example:
+#   sudo pad_fp_sweep capture_delay_ms 0 20 100 300
+D=/sys/bus/spi/devices/spi0.0
+P=/sys/module/fpc1020/parameters
+
+param=$1
+shift
+
+[ -e "$D/image" ] || { echo "fpc1020 not bound"; exit 1; }
+[ -e "$P/$param" ] || { echo "no such parameter: $param"; ls "$P" | tr '\n' ' '; echo; exit 1; }
+
+for v in "$@"; do
+	echo "$v" > "$P/$param" 2>/dev/null || { echo "  $v: cannot set"; continue; }
+	echo 1 > "$D/capture_now" 2>/dev/null
+	sleep 0.8
+	dd if="$D/image" of=/tmp/sweep.bin bs=1 count=11266 2>/dev/null
+	python3 - /tmp/sweep.bin "$param" "$v" <<'EOF'
+import sys
+try:
+    d = open(sys.argv[1], 'rb').read()[2:]
+except OSError:
+    print(f"  {sys.argv[2]}={sys.argv[3]}: no frame"); raise SystemExit
+if len(d) < 64:
+    print(f"  {sys.argv[2]}={sys.argv[3]}: short frame"); raise SystemExit
+m = sum(d) / len(d)
+sd = (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5
+print(f"  {sys.argv[2]:<20} {sys.argv[3]:>8}   mean {m:7.2f}  sd {sd:6.2f}  "
+      f"uniq {len(set(d)):3d}  min {min(d):3d}  max {max(d):3d}")
+EOF
+done

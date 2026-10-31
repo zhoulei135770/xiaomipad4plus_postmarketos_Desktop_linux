@@ -1,0 +1,3 @@
+#!/bin/sh
+# 应用菜单：jgmenu 自动从 .desktop 生成
+exec jgmenu_run

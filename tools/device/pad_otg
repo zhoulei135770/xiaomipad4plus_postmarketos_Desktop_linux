@@ -1,0 +1,55 @@
+#!/bin/sh
+# Turn the PM660L SMB2 OTG VBUS boost on or off and report the USB port voltage.
+#
+#   pad_otg on     supply 5 V on the USB port (host mode, e.g. USB stick)
+#   pad_otg off    stop supplying VBUS
+#   pad_otg        report the current state
+#
+# The control lives in patch 0010 (otg_vbus on the charger device).  It sets
+# OTG_EN_SRC to "command register" and then writes OTG_EN to CMD_OTG, which is
+# the same sequence the vendor smb-lib uses.
+#
+# The PMIC ADC exposes the port voltage as usbin_v.  With the charger unplugged
+# it should read about 5 V while OTG is enabled.
+O=$(find /sys/devices -name otg_vbus 2>/dev/null | head -1)
+
+vbus() {
+	# find the IIO channel whose label is usbin_v (device numbering varies)
+	for d in /sys/bus/iio/devices/iio:device*; do
+		for l in "$d"/in_voltage*_label; do
+			[ -e "$l" ] || continue
+			[ "$(cat "$l" 2>/dev/null)" = "usbin_v" ] || continue
+			base=${l%_label}
+			raw=$(cat "${base}_raw" 2>/dev/null)
+			scale=$(cat "${base}_scale" 2>/dev/null)
+			[ -z "$raw" ] && continue
+			awk -v r="$raw" -v s="$scale" \
+				'BEGIN { printf "  usbin_v: %.2f V (raw %d)\n", r * s / 1000000, r }'
+			return
+		done
+	done
+	echo "  usbin_v: n/a"
+}
+
+state() {
+	[ -n "$O" ] && echo "  otg_vbus = $(cat "$O" 2>/dev/null)"
+	vbus
+}
+
+case "$1" in
+on|off)
+	[ -z "$O" ] && { echo "otg_vbus attribute not found (patch 0010)"; exit 1; }
+	echo "$1" > "$O" || exit 1
+	sleep 1
+	echo "OTG VBUS $1"
+	state
+	;;
+"")
+	state
+	echo "usage: pad_otg on|off"
+	;;
+*)
+	echo "usage: pad_otg on|off"
+	exit 1
+	;;
+esac

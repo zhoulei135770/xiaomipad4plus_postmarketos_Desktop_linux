@@ -1,0 +1,35 @@
+#!/bin/sh
+# Check whether the front camera now answers on i2c.
+echo "=== front AVDD regulator ==="
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+grep -i "cam_avdd_front" /sys/kernel/debug/regulator/regulator_summary 2>/dev/null
+
+echo
+echo "=== i2c bus 4 devices ==="
+ls /sys/bus/i2c/devices/ 2>/dev/null | grep '^4-' || echo "(none)"
+
+echo
+echo "=== i2cdetect bus 4 (0x08-0x77) ==="
+if command -v i2cdetect >/dev/null 2>&1; then
+	i2cdetect -y -r 4 2>&1 | head -12
+else
+	echo "(i2cdetect not installed - trying a raw read)"
+	python3 - <<'EOF' 2>/dev/null || echo "  (no python3 i2c access)"
+import fcntl, os
+fd = os.open("/dev/i2c-4", os.O_RDWR)
+try:
+    for addr in (0x10, 0x20, 0x36):
+        try:
+            fcntl.ioctl(fd, 0x0703, addr)          # I2C_SLAVE
+            os.read(fd, 1)
+            print("  0x%02x: ACK" % addr)
+        except OSError as e:
+            print("  0x%02x: %s" % (addr, e.strerror))
+finally:
+    os.close(fd)
+EOF
+fi
+
+echo
+echo "=== dmesg: camera ==="
+dmesg 2>/dev/null | grep -iE "s5k5e8|cam_avdd_front|ov13855" | tail -12

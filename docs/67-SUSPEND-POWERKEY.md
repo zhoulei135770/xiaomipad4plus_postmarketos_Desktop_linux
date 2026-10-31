@@ -65,3 +65,60 @@ sudo systemctl suspend
 ```
 
 ⚠️ 历史上 RTC 闹钟**并不能唤醒**这台机器（只有电源键能），所以务必人在旁边。
+
+---
+
+## 6. 2026-10-31 修复：Wayland 下的电源键
+
+### 6.1 症状
+
+- 按电源键**屏幕不黑**；
+- 按一下就弹出「关机/重启/休眠/锁屏」菜单。
+
+### 6.2 三个根因
+
+1. **`tablet-powerkeyd` 用的是 X11 的 `xset dpms force off`**，而桌面是 **labwc（Wayland）** → 命令无效；
+   它判断屏幕状态读的是 DRM `dpms` 属性，Wayland 下恒为 `On`，所以永远"只会关不会开"。
+2. **labwc 自己也绑定了电源键**：`~/.config/labwc/rc.xml` 里
+   `XF86PowerOff → lxqt-leave`（这就是弹菜单的元凶）。
+3. **LXQt 全局快捷键** 也绑了 `XF86PowerOff → powermanager/keypoweroff`。
+
+### 6.3 修复
+
+| 项 | 做法 |
+|---|---|
+| 关屏 | 改为调用 `tablet-sleep`（真正写 `backlight/brightness=0`），唤醒调 `tablet-sleep wake` |
+| 状态判断 | 用背光值（0 = 已熄屏）+ `/run/tablet-sleep.saved`，不再依赖 DRM dpms |
+| 自动亮度冲突 | `tablet-autobright` 在 `/run/tablet-sleep.saved` 存在时跳过，不再抢背光 |
+| labwc 绑定 | 删除 `XF86PowerOff` 键位（备份 `rc.xml.bak-keypower`） |
+| LXQt 快捷键 | `[XF86PowerOff.41] Enabled=false`（备份 `globalkeyshortcuts.conf.bak-keypower`） |
+| **长按 3 秒出菜单** | `tablet-powerkeyd` 记录按下/抬起时间；≥3 s 执行 `lxqt-leave` |
+| 菜单弹不出的坑 | `session_env()` 原来只找 `xfce4-session`（旧桌面），拿不到 `WAYLAND_DISPLAY` → `lxqt-leave` 走 xcb 崩溃。改为识别 `lxqt-session`/`labwc` 并注入 `WAYLAND_DISPLAY` + `QT_QPA_PLATFORM=wayland` |
+
+### 6.4 实测
+
+```
+短按  -> power key: display off   （背光 255 -> 0，autobright 不再覆盖）
+再按  -> power key: display on    （恢复原亮度）
+长按3s -> power key: long press -> leave menu  →  LXQt 关机菜单
+```
+
+## 7. 2026-10-31：卸载 XFCE
+
+桌面最终定为 **labwc + LXQt**，XFCE 不再使用，已卸载：
+
+```
+53 个 xfce* / xfwm4 / thunar / xfconf / exo / garcon / tumbler / mousepad / ristretto 包
+-> 0 个残留
+```
+
+**卸载前钉住的两个共享包**（否则会被当作孤儿删掉）：
+
+```sh
+apk add --no-progress procps-ng font-dejavu   # ps/top/free 与界面字体
+```
+
+会话入口未变：`greetd -> /usr/local/bin/tablewayland-session -> startlxqtwayland`，
+卸载后 `/usr/share/wayland-sessions/` 只剩 `labwc`、`lxqt-wayland`、`phosh`。
+
+结果：包数 1712 → 1634，磁盘 6.0 G → 5.9 G，当前会话与组件全部正常。

@@ -1,0 +1,3 @@
+ui_print("clover postmarketOS restore");
+ui_print("boot.img + rootfs.tar.gz");
+abort("This ZIP must be flashed by the shell script (update-binary).");

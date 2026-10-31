@@ -1,0 +1,61 @@
+#!/sbin/sh
+# TWRP restore script for Xiaomi Mi Pad 4 Plus (clover) - postmarketOS
+#
+# Layout on this device (Android partition table):
+#   /dev/block/bootdevice/by-name/boot  -> boot.img (kernel + dtb)
+#   /dev/block/bootdevice/by-name/userdata -> ext4 rootfs (pmOS)
+#
+# Steps: flash boot.img, then unpack rootfs.tar.gz into the userdata mount.
+set -u
+
+OUTFD=/proc/self/fd/$2
+ui_print() { echo "ui_print $1" > "$OUTFD"; echo "ui_print" > "$OUTFD"; }
+abort() { ui_print "! $1"; exit 1; }
+
+ZIP=$3
+ui_print "==== clover postmarketOS restore ===="
+
+# ---- locate partitions ------------------------------------------------
+BOOT=/dev/block/bootdevice/by-name/boot
+[ -e "$BOOT" ] || BOOT=/dev/block/bootdevice/by-name/boot_a
+[ -e "$BOOT" ] || abort "boot partition not found"
+
+USERDATA=/dev/block/bootdevice/by-name/userdata
+[ -e "$USERDATA" ] || USERDATA=/dev/block/mmcblk1p64
+
+ui_print "boot     : $BOOT"
+ui_print "userdata : $USERDATA"
+
+# ---- 1. boot.img ------------------------------------------------------
+ui_print "Flashing boot.img ..."
+unzip -o "$ZIP" boot.img -d /tmp >/dev/null 2>&1 || abort "boot.img missing in zip"
+dd if=/tmp/boot.img of="$BOOT" bs=1M || abort "dd boot failed"
+rm -f /tmp/boot.img
+ui_print "boot.img flashed"
+
+# ---- 2. rootfs --------------------------------------------------------
+ui_print "Unpacking rootfs.tar.gz (this takes a while) ..."
+mkdir -p /data
+mount -t ext4 -o rw "$USERDATA" /data 2>/dev/null
+if ! mountpoint -q /data; then
+    # TWRP usually has userdata mounted already
+    ui_print "userdata not mounted, trying default /data"
+fi
+[ -d /data ] || abort "/data not available"
+
+# keep TWRP's own dirs out of the way
+rm -rf /data/lost+found 2>/dev/null
+
+unzip -o "$ZIP" rootfs.tar.gz -d /tmp >/dev/null 2>&1 || abort "rootfs.tar.gz missing in zip"
+ui_print "Extracting to /data ..."
+tar -xzf /tmp/rootfs.tar.gz -C /data --numeric-owner || abort "extract failed"
+rm -f /tmp/rootfs.tar.gz
+
+# ---- 3. permissions ---------------------------------------------------
+chown 0:0 /data 2>/dev/null
+chmod 755 /data 2>/dev/null
+ui_print "rootfs extracted"
+
+# ---- 4. extlinux-free boot: pmOS uses the boot.img cmdline ------------
+ui_print "==== done: reboot to system ===="
+exit 0

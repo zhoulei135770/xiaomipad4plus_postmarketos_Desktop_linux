@@ -26,6 +26,8 @@ EV_REL = 2
 EV_ABS = 3
 EV_MSC = 4
 KEY_POWER = 116
+KEY_VOLUMEUP = 115
+KEY_VOLUMEDOWN = 114
 EVENT_FMT = "llHHi"
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
 
@@ -96,13 +98,66 @@ LONG_PRESS_S = 3.0
 LEAVE_CMD = "/usr/bin/lxqt-leave"
 
 
-def show_power_menu(env):
+def run_as_user(argv, env):
+    """Run a GUI helper as the session user with the full environment."""
+    e = dict(os.environ)
+    e.update(env)
+    e.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     try:
-        subprocess.Popen([LEAVE_CMD], env=env, start_new_session=True,
+        subprocess.Popen(["/usr/sbin/setpriv", "--reuid=10000", "--regid=10000",
+                          "--clear-groups", "--", *argv],
+                         env=e, start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log("power key: long press -> leave menu")
+        return True
     except OSError as exc:
-        log(f"leave menu failed: {exc}")
+        log(f"spawn failed: {exc}")
+        return False
+
+
+def show_power_menu(env):
+    if run_as_user([LEAVE_CMD], env):
+        log("power key: long press -> leave menu")
+
+
+def current_volume(env):
+    """Read the sink volume as an integer percentage (PulseAudio)."""
+    try:
+        r = subprocess.run(["/usr/sbin/setpriv", "--reuid=10000", "--regid=10000",
+                            "--clear-groups", "--",
+                            "/usr/bin/pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+                           env={**os.environ, **env}, capture_output=True,
+                           text=True, timeout=5)
+        m = None
+        for tok in r.stdout.replace("/", " ").split():
+            if tok.endswith("%"):
+                m = tok[:-1]
+                break
+        return int(m) if m and m.isdigit() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def volume_osd(env, pct):
+    """A notification popup with a progress hint (shown by lxqt-notificationd)."""
+    if pct is None:
+        return
+    icon = ("audio-volume-muted" if pct == 0 else
+            "audio-volume-low" if pct < 34 else
+            "audio-volume-medium" if pct < 67 else "audio-volume-high")
+    run_as_user(["/usr/sbin/notify-send", "-a", "volume", "-i", icon,
+                 "-h", f"int:value:{pct}", "-t", "1200",
+                 "音量", f"{pct}%"], env)
+
+
+def volume(delta, env):
+    """This image runs PulseAudio (PipeWire has no nodes), so use pactl."""
+    ok = run_as_user(["/usr/bin/pactl", "set-sink-volume", "@DEFAULT_SINK@",
+                      f"{delta:+d}%"], env)
+    if not ok:
+        ok = run_as_user(["/usr/bin/wpctl", "set-volume",
+                          "@DEFAULT_AUDIO_SINK@", f"{abs(delta)}%{'+' if delta > 0 else '-'}"], env)
+    if ok:
+        log(f"volume {delta:+d}% -> {current_volume(env)}%")
 
 def asleep():
     """True when the panel is blanked.
@@ -118,7 +173,20 @@ def asleep():
     return os.path.exists(SLEEP_STATE)
 
 
+LOCK_CMD = "/usr/bin/gtklock"
+
+
+def locked():
+    try:
+        return subprocess.run(["/usr/bin/pgrep", "-f", "/usr/bin/gtklock"],
+                              capture_output=True, timeout=5).returncode == 0
+    except OSError:
+        return False
+
+
 def blank(env):
+    if not locked():
+        run_as_user([LOCK_CMD, "-d"], env)
     subprocess.run(["/usr/local/bin/tablet-sleep"], capture_output=True,
                    timeout=15)
 
@@ -151,6 +219,7 @@ def main():
 
     last_wake = 0.0
     press_at = {}
+    last_vol = {}
     while True:
         ready, _, _ = select.select(list(fds), [], [], 2.0)
         for fd in ready:
@@ -184,6 +253,14 @@ def main():
                                 blank(env)
                             time.sleep(0.3)
                 else:
+                    if typ == EV_KEY and val == 1 and code in (KEY_VOLUMEUP,
+                                                               KEY_VOLUMEDOWN):
+                        now = time.time()
+                        if now - last_vol.get(code, 0.0) < 0.20:
+                            continue
+                        last_vol[code] = now
+                        volume(5 if code == KEY_VOLUMEUP else -5, env)
+                        continue
                     if asleep() and time.time() - last_wake > 0.5:
                         last_wake = time.time()
                         log(f"input on {name or path}: display on")

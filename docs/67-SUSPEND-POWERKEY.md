@@ -122,3 +122,71 @@ apk add --no-progress procps-ng font-dejavu   # ps/top/free 与界面字体
 卸载后 `/usr/share/wayland-sessions/` 只剩 `labwc`、`lxqt-wayland`、`phosh`。
 
 结果：包数 1712 → 1634，磁盘 6.0 G → 5.9 G，当前会话与组件全部正常。
+
+---
+
+## 8. 锁屏（2026-10-31 晚）
+
+### 8.1 为什么之前没有锁屏
+
+原来是"能关屏、但没有锁"：电源键只关背光。要做锁屏有两个坑：
+
+1. **swaylock 在这台机器上只出黑屏**（`ext-session-lock` + wlroots/EGL 渲染在 llvmpipe 上出不了图），
+   进程在跑、屏幕全黑、没有密码框 → 改用 **gtklock**（GTK4 + layer-shell，渲染路径不同）。
+2. **PAM 认证链路是断的**：`/etc/pam.d/gtklock` 是 `auth include login`，而 `/etc/pam.d/login`
+   指向的 `base-auth` 在 `/etc/pam.d/` 里根本不存在 → 出现"输密码框一闪就进桌面"。
+   真正的默认配置在 **`/usr/lib/pam.d/`**（`base-auth`/`base-session` 里有 `pam_systemd`）。
+
+### 8.2 ⚠️ 重大教训：不要整份覆盖 `/etc/pam.d/base-*`
+
+我一开始自己在 `/etc/pam.d/` 新建了 `login`、`base-auth`、`base-session` 等，
+**覆盖了发行版默认值**（它们会 shadow `/usr/lib/pam.d/`）。
+结果 `base-session` 没有 `pam_systemd` → 会话不注册到 logind → `libseat` 打不开 seat
+→ greetd 的 greeter 崩溃 → **开机没有桌面**（只有一行行报错）。
+
+修复：删掉自己创建的那些文件，让 `/usr/lib/pam.d/` 生效；锁屏只需要它自己的
+`swaylock` / `gtklock` 配置项（引用官方 `base-*` 即可）。
+
+### 8.3 现在锁屏行为
+
+| 场景 | 行为 |
+|---|---|
+| 短按电源键 | `gtklock` 锁屏 + 关背光 |
+| 开机 | 自动登录后 **立即锁屏**（labwc autostart 里启 `gtklock -d`），要输密码才进桌面 |
+| 解锁 | 输入登录密码（PAM `pam_unix`） |
+| 长按 3 秒 | LXQt 关机菜单 |
+
+锁屏期间的"亮屏"由 `tablet-powerkeyd` 负责（任意输入唤醒背光），密码由 gtklock 处理。
+
+## 9. 音量键（2026-10-31 晚）
+
+| 项 | 结论 |
+|---|---|
+| 谁在监听 | 没有任何现成程序；`lxqt-globalkeyshortcuts` 已被停用 |
+| 音量键设备 | 音量+ = `gpio-keys`，音量- = `pm8941_resin` |
+| 音频后端 | **PulseAudio**（PipeWire 在跑但没有节点，`wpctl` 无效） |
+| 实现 | `tablet-powerkeyd` 直接处理 KEY_VOLUMEUP/DOWN → `pactl set-sink-volume ±5%` |
+| 重复通知 | 我们发的 `notify-send` 和 **lxqt-panel 自己的 OSD** 重复 → 去掉我们那一个 |
+| 防抖 | 同键 200 ms 内只处理一次（某些设备会重复上报） |
+| `No qdbus command available` | `lxqt-qdbus` 是脚本，需要 `qdbus` → 装 `qt6-qttools`（含 `qdbus6`，9 MiB） |
+
+## 10. 桌面"应用菜单"图标（2026-10-31 晚）
+
+`/usr/local/bin/tablet-menu` 原来是 `jgmenu_run`。jgmenu 在 labwc/Wayland 下弹出的是
+**独立 surface，点其它地方不会消失**（只能 kill）——就是"多点一个关不掉的菜单"。
+
+改为调用 LXQt 面板原生菜单：
+
+```sh
+exec /usr/bin/lxqt-qdbus openmenu
+```
+
+该菜单锚定在面板上，点别处自动关闭。**jgmenu 已卸载**。
+
+## 11. 2026-10-31 晚其它
+
+- **XFCE 已卸载**（53 个包），桌面固定为 labwc + LXQt；
+- 桌面图标的黄色 ⚠ 是 pcmanfm 的"未受信任启动器"标记，已写入
+  `metadata::trusted=true`（`gio set`，需要 `XDG_RUNTIME_DIR`）；
+- **OTG 在硬复位后会失效**（SMB2 的 CC 检测读不到任何东西，`dfp=0`、强制 `otg_vbus=1` 也无枚举），
+  **重启后自愈** —— 硬复位后 PMIC/USB-C 状态不一致，属已知现象，不用改软件。

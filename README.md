@@ -123,7 +123,8 @@ fastboot boot twrp-3.7.0_9-0-clover-mipad4.img
 > ⚠️ 镜像约 2.6 GB，**长时间传输容易中断**：
 > 下载请用 `curl -C -` 断点续传，务必 `sha256sum -c` 校验。
 > 完整的刷机策略、分卷合并、失败恢复见 **[`docs/FLASHING.md`](docs/FLASHING.md)**。
-> 包内容校验（UUID / 权限 / 架构）见 [`docs/RESTORE-VERIFY.md`](docs/RESTORE-VERIFY.md)。
+> 包内容校验（UUID / 权限 / 架构）见 [docs/RESTORE-VERIFY.md](docs/RESTORE-VERIFY.md)。
+> **实测验证报告（21 项全部通过）**：[docs/VERIFICATION.md](docs/VERIFICATION.md)
 
 ---
 

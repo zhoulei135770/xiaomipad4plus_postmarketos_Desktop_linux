@@ -1,5 +1,10 @@
 # 恢复包实测验证报告
 
+> **范围声明（2026-10-31 补）**：本页验证的是**归档内容本身**（哈希、权限、UUID、架构、
+> 路径安全），全部通过。但它**不覆盖刷机流程**——真机完整刷入时又暴露了三个 TWRP 限制
+> （无法 mmap >2 GiB、`/sdcard` 不是分区根、格式化换 UUID）。
+> 刷机请以 [`FLASH-TESTED.md`](FLASH-TESTED.md) 和 [`FLASHING.md`](FLASHING.md) 为准。
+
 > 对 `clover-restore-20261031.zip`（分卷 `.z01` + `.zip`，共 2.72 GB）的实测结果。
 > 所有命令都在**本机（小米平板 4 Plus，sd660，aarch64）**上执行。
 

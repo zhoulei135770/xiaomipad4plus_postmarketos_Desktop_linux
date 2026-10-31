@@ -98,33 +98,32 @@ sudo reboot
 
 ### 恢复（TWRP / fastboot）
 
-镜像包在 **[Releases](https://github.com/zhoulei135770/xiaomipad4plus_postmarketos_Desktop_linux/releases)**：
+镜像在 **[Releases](https://github.com/zhoulei135770/xiaomipad4plus_postmarketos_Desktop_linux/releases)**：
 
-| 文件 | 用途 |
-|---|---|
-| `twrp-3.7.0_9-0-clover-mipad4.img` | TWRP 3.7.0 recovery（60 MB，`fastboot boot` 即可临时启动） |
-| `clover-restore-*.z01` + `*.zip` | **完整恢复包分卷**（1500 MB + 1224 MB，GitHub 单附件上限 2 GiB 故分卷） |
-| `*.sha256` | 校验文件 |
-
-**分卷合并**（下载 .z01 和 .zip 到同一目录后）：
-
-```sh
-zip -s 0 clover-restore-20261031.zip --out full.zip   # 自动合并
-sha256sum -c clover-restore-20261031.sha256
-# 合并后的 full.zip 就是 TWRP 可刷的完整包
-```
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| `clover-restore-lite.zip` | 1.84 GB | **推荐**，TWRP 里直接 Install，一步刷完 |
+| `boot.img` | 64 MB | 只换内核：`fastboot flash boot boot.img` |
+| `twrp-3.7.0_9-0-clover-mipad4.img` | 60 MB | `fastboot boot` 进 TWRP |
+| `flash-via-adb.sh` | 2 KB | 备用 adb 刷机（实测可用） |
 
 ```sh
-# 推荐顺序：fastboot 刷内核（小、稳）→ TWRP 刷整包
-fastboot boot twrp-3.7.0_9-0-clover-mipad4.img
-# TWRP: Install → full.zip → Reboot System
+# 1) 校验
+sha256sum -c clover-restore-lite.zip.sha256
+
+# 2) U 盘放好 zip → 平板进 TWRP
+#    Mount → 勾 USB OTG → Install → /usb_otg/clover-restore-lite.zip
 ```
 
-> ⚠️ 镜像约 2.6 GB，**长时间传输容易中断**：
-> 下载请用 `curl -C -` 断点续传，务必 `sha256sum -c` 校验。
-> 完整的刷机策略、分卷合并、失败恢复见 **[`docs/FLASHING.md`](docs/FLASHING.md)**。
-> 包内容校验（UUID / 权限 / 架构）见 [docs/RESTORE-VERIFY.md](docs/RESTORE-VERIFY.md)。
-> **实测验证报告（21 项全部通过）**：[docs/VERIFICATION.md](docs/VERIFICATION.md)
+脚本自动完成：刷 `boot.img` → 解包到 `/data` → 校验 `sbin/init` → **恢复 ext4 UUID**（格式化会换掉它）→ 同步。
+
+> ⚠️ 三点实测教训（详见 [`docs/FLASH-TESTED.md`](docs/FLASH-TESTED.md)）：
+> TWRP **无法 mmap >2 GiB 的包**；`/sdcard` 不是分区根；
+> **格式化会改变 UUID**，必须写回 `8def993b-42f5-4ba1-9813-c046e498fe22`。
+> 若 TWRP 仍报"刷机包已损坏"，用 `flash-via-adb.sh`。
+> 包内容校验（UUID / 权限 / 架构）见 [docs/RESTORE-VERIFY.md](docs/RESTORE-VERIFY.md)，
+> 静态检查 21 项见 [docs/VERIFICATION.md](docs/VERIFICATION.md)，
+> 精简包做法见 [docs/LITE-PACKAGE.md](docs/LITE-PACKAGE.md)。
 
 ---
 

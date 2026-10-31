@@ -1,5 +1,7 @@
 # 恢复镜像的校验方法与包内结构
 
+> 实测刷机记录与三个 TWRP 坑见 [FLASH-TESTED.md](FLASH-TESTED.md)；刷机步骤见 [FLASHING.md](FLASHING.md)。
+
 > 目标：确保 `clover-restore-*.zip` 在 **fastboot** 或 **TWRP** 下能直接刷回，
 > 且 **UUID / 权限 / 架构** 都正确。
 

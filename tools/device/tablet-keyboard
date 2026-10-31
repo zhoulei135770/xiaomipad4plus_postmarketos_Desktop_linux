@@ -1,0 +1,28 @@
+#!/bin/sh
+# tablet-keyboard - toggle the on-screen keyboard (wvkbd).
+#
+# Runs as the session user; the desktop icon "屏幕键盘" calls this.
+# wvkbd sends real key events through the virtual-keyboard protocol, so it
+# works in Wayland apps (and combines with fcitx5 for Chinese input).
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+export XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-us}
+
+KB=/usr/sbin/wvkbd-deskintl
+HEIGHT=280
+
+if pgrep -f "$KB" >/dev/null 2>&1; then
+	# visible -> hide
+	pkill -f "$KB"
+	notify-send -a keyboard -i input-keyboard -t 900 "屏幕键盘" "已收起" >/dev/null 2>&1 || true
+	exit 0
+fi
+
+setsid "$KB" -L "$HEIGHT" </dev/null >/dev/null 2>&1 &
+sleep 1
+if pgrep -f "$KB" >/dev/null 2>&1; then
+	notify-send -a keyboard -i input-keyboard -t 900 "屏幕键盘" "已展开（Ctrl/Alt/Tab 都有）" >/dev/null 2>&1 || true
+else
+	notify-send -a keyboard -i dialog-error -t 2000 "屏幕键盘" "启动失败" >/dev/null 2>&1 || true
+	exit 1
+fi

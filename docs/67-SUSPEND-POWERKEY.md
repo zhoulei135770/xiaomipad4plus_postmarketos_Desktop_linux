@@ -257,3 +257,89 @@ export LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0
 这是**应用层锁**（不是 `ext-session-lock`）：能挡住日常误触和普通用户，
 但技术上不是内核/合成器级别的会话锁。考虑到"没有键盘就先得能进去"，
 这是在可用性与安全性之间的取舍。
+
+---
+
+## 13. 整机假死根因：DPU ring hang（2026-10-31 晚）
+
+### 13.1 症状
+
+- 屏幕定格、**触摸无反应**、SSH 连不上（TCP 能建立但读不到 banner）；
+- 只能长按电源 10 秒强断；
+- 重启后 1~2 分钟又复现（当时开了"开机自动锁屏"）。
+
+### 13.2 日志证据（`journalctl -b -1`）
+
+```
+17:19:30 [drm:adreno_idle [msm]] ERROR: 5.1.2.0: timeout waiting to drain ringbuffer 0 rptr/wptr = 23/C
+17:19:30 msm_dpu c901000.display-controller: CP | opcode error | possible opcode=0x00000000
+17:19:31 msm_dpu: [drm:a5xx_irq] ERROR: gpu fault ring 0 fence ffffffe9 status 800001C1
+17:19:33 msm_dpu: [drm:recover_worker] ERROR: 5.1.2.0: hangcheck recover!
+17:19:33 msm_dpu: [drm:recover_worker] ERROR: offending task: labwc
+17:20:02 rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
+17:20:02 rcu:       1-...0: (8 ticks this GP) idle=... softirq=5759/5761
+17:20:12 watchdog: BUG: soft lockup - CPU#3 stuck for 22s! [rcu_exp_gp_kthr]
+```
+
+**因果链**：显示控制器命令队列卡住 → DPU 报 opcode error → 内核 hangcheck 尝试恢复 →
+CPU 关中断死循环 → RCU 等不到该 CPU → 整机假死（所以 SSH 也不响应）。
+
+### 13.3 触发条件与处理
+
+| 触发 | 处理 |
+|---|---|
+| **开机自动锁屏**（layer-shell overlay 在 DPU 初始化窗口期提交） | 删除该 autostart 项，开机不再自动锁屏 |
+| 合成器 GPU 提交 | 先进 `WLR_RENDERER=pixman` 全软件渲染验证（稳定但太卡），确认根因后**改回 GPU**，只让 GTK 应用走 cairo（`GSK_RENDERER=cairo`），实测 5 分钟 0 次 DRM 错误 |
+
+结论：**没有开机锁屏时，硬件 GPU 渲染是稳定的**；之前的假死是"锁屏图层 + 开机提交"踩中了 DPU 的 bug。
+
+下次再遇到假死，先看：
+
+```sh
+journalctl -b -1 | grep -iE "adreno_idle|opcode error|hangcheck|soft lockup|rcu.*stall"
+```
+
+## 14. 触摸标定（Wayland / labwc）
+
+### 14.1 为什么需要标定
+
+面板**原生是竖屏 1200×1920**，桌面靠 `wlr-randr --transform 90` 转成横屏 1920×1200。
+触摸坐标要经过"设备坐标 → 输出变换"的映射，udev 里的 `LIBINPUT_CALIBRATION_MATRIX`
+必须与之匹配，否则点击会镜像/旋转。
+
+### 14.2 标定过程（实测法）
+
+1. 让用户在四角各点一次；
+2. 观察"点击位置 → 实际响应位置"的对应关系（例如：左下→左下、右上→右上、
+   左上→右下、右下→左上 = 180° 旋转）；
+3. 组合出逆变换矩阵，写入 udev 规则，**重启会话**（libinput 只在打开设备时读矩阵）。
+
+### 14.3 最终配置
+
+```udev
+# /etc/udev/rules.d/99-goodix-landscape.rules
+ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"
+```
+
+即 `x' = 1 - y`、`y' = x`（这也正是当年 X11 时代在用的那份矩阵）。
+
+验证：四角点击全部落位正确。
+
+## 15. 桌面体验修正
+
+| 问题 | 原因 | 修复 |
+|---|---|---|
+| 点图标"跑到右下角" | labwc 窗口放置策略 `cascade` | `~/.config/labwc/rc.xml` → `<placement><policy>center</policy>` |
+| 图标单击只选中、不打开 | `SingleClick=false` | `~/.config/pcmanfm-qt/lxqt/settings.conf` 里 `[Behavior]` 和 `[Desktop]` 都设为 `true`（需重启会话） |
+| 屏幕键盘卡在屏幕上、布局错乱 | `wvkbd-deskintl` 残留实例 | `pkill -f wvkbd`；`/usr/local/bin/tablet-keyboard` 改为一键展开/收起 wvkbd |
+
+## 16. 排查工具箱（本机已装）
+
+| 工具 | 用途 |
+|---|---|
+| `libinput debug-events --device /dev/input/event4` | 看触摸原始坐标（已应用标定矩阵） |
+| `wlrctl toplevel list/close` | 列出/关闭窗口 |
+| `wev` | 查看应用实际收到的输入事件 |
+| `grim` | 截图 |
+| `wtype` | 注入键盘事件（测输入法/中文候选） |
+| `journalctl -b -1` | 上一次启动的日志（假死分析主力） |

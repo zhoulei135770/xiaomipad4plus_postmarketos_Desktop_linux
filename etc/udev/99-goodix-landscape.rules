@@ -1,0 +1,6 @@
+# Goodix touchscreen on the Mi Pad 4 Plus (Wayland/labwc).
+# The panel is natively portrait (1200x1920) and the output is rotated 90 deg
+# to landscape.  Measured corner mapping gave a 180 deg rotation with the
+# identity matrix, so this is the inverse rotation (also used under X11):
+#   x' = 1 - y ,  y' = x
+ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"

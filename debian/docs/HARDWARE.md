@@ -118,3 +118,18 @@ sudo debian/scripts/wps-blank.sh
 会生成 /usr/share/applications/wps-blank.desktop（菜单里的「WPS 文字（新建空白）」），
 点它直接进编辑界面（模板在 /usr/share/wps-office/templates/blank.docx）。
 
+
+### docx 能开、xlsx/pptx 打不开
+
+文件关联被指向了 wps-office-prometheus.desktop（融合模式统一入口），它要先拉起
+CEF 首页，所以 xlsx/pptx 看起来"没反应"；docx 恰好走了 Writer。
+
+修法：把 Kingsoft 的启动脚本换成直接 exec 各组件的 wrapper，并把 MIME 关联改到
+对应的 .desktop：
+
+``bash
+sudo debian/scripts/wps-split.sh
+``
+
+之后：.docx → wps、.xlsx → et、.pptx → wpp，双击/命令行都能直接进编辑器。
+

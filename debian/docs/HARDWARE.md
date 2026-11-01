@@ -105,3 +105,16 @@ sudo debian/scripts/wps-fix.sh
 
 首次启动会弹《WPS Office 最终用户许可协议》，点“确定”即可。
 
+
+### 「新建」页白屏的绕过办法
+
+WPS 的「首页 / 新建」是内嵌 CEF 页面，要联网拉模板，网络不好就白屏（首页有缓存，
+等 20–30 秒能出来；新建页可能一直白）。装一个直接开空白文档的入口即可绕开：
+
+``bash
+sudo debian/scripts/wps-blank.sh
+``
+
+会生成 /usr/share/applications/wps-blank.desktop（菜单里的「WPS 文字（新建空白）」），
+点它直接进编辑界面（模板在 /usr/share/wps-office/templates/blank.docx）。
+

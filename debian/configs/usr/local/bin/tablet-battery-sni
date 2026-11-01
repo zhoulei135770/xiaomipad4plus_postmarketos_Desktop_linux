@@ -1,0 +1,177 @@
+#!/usr/bin/python3
+"""tablet-battery-sni - percentage battery indicator for the LXQt panel.
+
+UPower reports 0 Wh on this device (the qcom-battery driver exposes
+capacity/voltage/current only), so LXQt power management shows 0 %.  This
+StatusNotifierItem reads /sys/class/power_supply directly and draws the
+percentage as text in the panel's icon slot.
+"""
+import os
+import subprocess
+import sys
+
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+from PIL import Image, ImageDraw, ImageFont
+
+BAT = "/sys/class/power_supply/qcom-battery"
+CHG = "/sys/class/power_supply/pm660-charger"
+SETTINGS = "/usr/local/bin/tablet-settings"
+SNI = "org.kde.StatusNotifierItem"
+PROP = "org.freedesktop.DBus.Properties"
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def snapshot():
+    cap = read(BAT + "/capacity", "?")
+    status = read(BAT + "/status", "Unknown")
+    volt = read(BAT + "/voltage_now", "0")
+    temp = read(BAT + "/temp", "0")
+    online = read(CHG + "/online", "0")
+    try:
+        v = float(volt) / 1e6
+    except ValueError:
+        v = 0.0
+    try:
+        t = float(temp) / 10.0
+    except ValueError:
+        t = 0.0
+    charging = online == "1" and status.lower().startswith("charg")
+    return cap, status, v, t, charging
+
+
+def pixmap(text, charging):
+    size = 44
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    font = None
+    for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"):
+        try:
+            font = ImageFont.truetype(path, 20)
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    color = (138, 180, 248, 255) if charging else (228, 233, 244, 255)
+    tw = d.textlength(text, font=font)
+    d.text(((size - tw) / 2, (size - 20) / 2 - 2), text, font=font, fill=color)
+    out = bytearray()
+    px = img.load()
+    for y in range(size):
+        for x in range(size):
+            r, g, b, a = px[x, y]
+            out += bytes((a, r, g, b))
+    return dbus.Array([dbus.Struct((dbus.Int32(size), dbus.Int32(size),
+                                   dbus.ByteArray(bytes(out))),
+                                  signature="iiay")],
+                      signature="(iiay)")
+
+
+class Sni(dbus.service.Object):
+    def __init__(self, bus):
+        self.bus = bus
+        self.cap, self.status, self.v, self.t, self.charging = snapshot()
+        self.pix = pixmap(self.cap, self.charging)
+        super().__init__(bus, "/StatusNotifierItem")
+
+    # ---- org.kde.StatusNotifierItem --------------------------------
+    def _props(self):
+        tip = dbus.Struct((
+            "battery", self.pix, "电池",
+            "电池 %s%% · %s\n%.2f V · %.1f °C" % (self.cap, self.status, self.v, self.t),
+        ), signature="sa(iiay)ss", variant_level=1)
+        return {
+            "Category": dbus.String("SystemServices", variant_level=1),
+            "Id": dbus.String("tablet-battery", variant_level=1),
+            "Title": dbus.String("电池", variant_level=1),
+            "Status": dbus.String("Active", variant_level=1),
+            "IconName": dbus.String("", variant_level=1),
+            "IconPixmap": dbus.Array(self.pix, signature="(iiay)", variant_level=1),
+            "ToolTip": tip,
+            "Menu": dbus.ObjectPath("/NO_DBUSMENU", variant_level=1),
+            "ItemIsMenu": dbus.Boolean(False, variant_level=1),
+        }
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def Activate(self, x, y):
+        subprocess.Popen([SETTINGS])
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def SecondaryActivate(self, x, y):
+        pass
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def ContextMenu(self, x, y):
+        pass
+
+    @dbus.service.method(SNI, in_signature="is", out_signature="")
+    def Scroll(self, delta, orientation):
+        pass
+
+    # ---- org.freedesktop.DBus.Properties ---------------------------
+    @dbus.service.method(PROP, in_signature="ss", out_signature="v")
+    def Get(self, interface, prop):
+        return self._props()[prop]
+
+    @dbus.service.method(PROP, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        return dbus.Dictionary(self._props(), signature="sv")
+
+    @dbus.service.signal(PROP, signature="sa{sv}as")
+    def PropertiesChanged(self, interface, changed, invalidated):
+        pass
+
+    def refresh(self):
+        cap, status, v, t, charging = snapshot()
+        changed = {}
+        if (cap, charging) != (self.cap, self.charging):
+            self.pix = pixmap(cap, charging)
+            changed["IconPixmap"] = dbus.Array(self.pix, signature="(iiay)", variant_level=1)
+            changed["ToolTip"] = self._props()["ToolTip"]
+        self.cap, self.status, self.v, self.t, self.charging = cap, status, v, t, charging
+        if changed:
+            self.PropertiesChanged(SNI, dbus.Dictionary(changed, signature="sv"), dbus.Array([], signature="s"))
+        return True
+
+
+def main():
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    name = "org.tablet.BatterySni"
+    try:
+        bus_name = dbus.service.BusName(name, bus=bus, do_not_queue=True)
+    except dbus.exceptions.NameExistsException as e:
+        print("name exists:", e, flush=True)
+        return 1
+    item = Sni(bus)
+
+    def register():
+        try:
+            watcher = bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
+            watcher.RegisterStatusNotifierItem(name, dbus_interface="org.kde.StatusNotifierWatcher")
+            print("registered", name, flush=True)
+        except dbus.DBusException as e:
+            print("register failed:", e, flush=True)
+            return True
+        return False
+
+    GLib.timeout_add(500, register)
+    GLib.timeout_add_seconds(30, item.refresh)
+    loop = GLib.MainLoop()
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

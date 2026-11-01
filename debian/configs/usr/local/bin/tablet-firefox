@@ -1,0 +1,11 @@
+#!/bin/sh
+# Firefox on the tablet: force native Wayland and the Mesa command-buffer
+# workarounds (a downstream msm kernel + upstream Mesa combination).
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/10000}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/10000/bus}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+export XDG_SESSION_TYPE=wayland
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland
+export FD_MESA_DEBUG=nogrow,noindirect
+exec /usr/lib/firefox-esr/firefox-esr "$@"

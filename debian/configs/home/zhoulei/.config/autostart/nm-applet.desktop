@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Network Manager Applet
+Exec=nm-applet
+Icon=network-workgroup
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true

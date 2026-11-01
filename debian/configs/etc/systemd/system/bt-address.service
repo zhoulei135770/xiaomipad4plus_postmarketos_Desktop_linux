@@ -1,0 +1,14 @@
+[Unit]
+Description=Configure WCN3990 Bluetooth public address
+After=systemd-udev-settle.service systemd-rfkill.service
+Wants=systemd-udev-settle.service
+Before=bluetooth.service
+ConditionPathExists=/sys/class/bluetooth
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/bt-address-setup.sh
+
+[Install]
+WantedBy=multi-user.target

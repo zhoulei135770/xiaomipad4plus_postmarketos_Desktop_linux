@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Battery percentage
+Comment=Battery percentage tray icon (reads /sys directly)
+Exec=/usr/local/bin/tablet-battery-sni
+X-LXQt-Need-Tray=true
+OnlyShowIn=LXQt;

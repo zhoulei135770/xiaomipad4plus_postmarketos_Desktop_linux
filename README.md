@@ -191,3 +191,19 @@ screenshots/     界面截图
 
 > 完全自愿，不打赏也照样能用、照样更新。
 > 比钱更管用的是：**star ⭐、提 issue 报 bug、把你的机型和结果告诉我**。
+---
+
+## Debian arm64 移植（2026-11，替代 postmarketOS rootfs）
+
+在**保留 pmOS boot 分区**的前提下，把 userdata 换成 **Debian forky arm64 + labwc + LXQt 2.4**
+的可刷镜像（同样可以用 fastboot / TWRP 直接刷）。
+
+- 说明与现状：[debian/README.md](debian/README.md)
+- 刷机：[debian/docs/FLASH.md](debian/docs/FLASH.md)
+- 从零构建：[debian/docs/BUILD.md](debian/docs/BUILD.md)
+- 硬件/驱动笔记：[debian/docs/HARDWARE.md](debian/docs/HARDWARE.md)
+- 更新日志：[debian/docs/CHANGELOG.md](debian/docs/CHANGELOG.md)
+- 镜像：[Releases](../../releases) 里的 `debian-rootfs-v13.img.gz.part-*`
+
+Debian 版目前可用：WiFi / 蓝牙 / GPU(freedreno) / 自动旋转 / 自动亮度 / 声音 / 锁屏 /
+电量托盘 / 星火商店(arm64) / Chromium(arm64)。未完成：4G 数据(IPA)、麦克风采集、指纹。

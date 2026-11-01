@@ -1,0 +1,8 @@
+# Prefer the KMS/glamor path: when the Adreno GPU is present Xorg uses it,
+# otherwise this is harmless and llvmpipe is used instead.
+Section "Device"
+    Identifier  "msm"
+    Driver      "modesetting"
+    Option      "AccelMethod" "glamor"
+    Option      "DRI"         "3"
+EndSection

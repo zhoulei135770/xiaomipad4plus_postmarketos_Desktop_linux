@@ -1,0 +1,9 @@
+Section "Device"
+    Identifier  "msm-soft"
+    Driver      "modesetting"
+    Option      "AccelMethod" "none"
+    # TearFree 会把画面先画到影子缓冲、再在 vblank 时拷贝到扫描缓冲。
+    # 这台设备的 DPU vblank 不可靠，拷贝经常永远不发生 -> 黑屏只剩光标。
+    Option      "TearFree" "false"
+    Option      "SWCursor" "true"
+EndSection

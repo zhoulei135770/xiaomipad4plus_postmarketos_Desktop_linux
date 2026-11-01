@@ -1,0 +1,9 @@
+[Unit]
+Description=Tablet auto-rotate (IIO accelerometer)
+After=greetd.service
+[Service]
+ExecStart=/usr/local/bin/tablet-orientd
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

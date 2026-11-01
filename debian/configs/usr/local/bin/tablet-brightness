@@ -1,0 +1,6 @@
+#!/bin/sh
+# set panel brightness (root helper for 平板设置)
+val="$1"
+case "$val" in ''|*[!0-9]*) exit 2;; esac
+[ "$val" -ge 1 ] && [ "$val" -le 255 ] || exit 2
+printf '%s\n' "$val" > /sys/class/backlight/lcd-backlight/brightness

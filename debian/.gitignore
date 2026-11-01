@@ -1,0 +1,12 @@
+# 构建 / 刷机产物，不进仓库（镜像放 Release）
+release/*
+!release/README.md
+*.img
+*.img.gz
+*.img.gz.part-*
+*.deb
+*.tgz
+*.tar
+*.bak
+*.bak-*
+__pycache__/

@@ -1,0 +1,7 @@
+Section "Device"
+    Identifier "msm"
+    Driver     "modesetting"
+    Option     "AccelMethod" "glamor"
+    Option     "DRI"         "3"
+    Option     "TearFree"    "false"
+EndSection

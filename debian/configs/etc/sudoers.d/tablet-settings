@@ -1,0 +1,1 @@
+zhoulei ALL=(root) NOPASSWD: /usr/local/bin/tablet-drop-caches, /usr/local/bin/tablet-brightness

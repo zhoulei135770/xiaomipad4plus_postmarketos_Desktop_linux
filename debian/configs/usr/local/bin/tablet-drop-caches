@@ -1,0 +1,4 @@
+#!/bin/sh
+# Reclaim page cache / dentries / inodes.  Invoked by the tablet settings app.
+sync
+echo 3 > /proc/sys/vm/drop_caches

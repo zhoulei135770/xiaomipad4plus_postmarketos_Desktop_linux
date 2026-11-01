@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""tablet-powerkeyd - power key + any-input wake for the Mi Pad 4 Plus.
+
+Two jobs:
+
+  * power key (pm8941_pwrkey, KEY_POWER): toggle the panel between blanked
+    and lit.  logind on this image refuses HandlePowerKey=lock-session, so the
+    key is handled here instead.
+  * any other input device (touch, keyboard, mouse): if the panel is blanked,
+    light it up again.  X's DPMS does NOT unblank on input by itself (measured:
+    injected motion/key left /sys/class/drm/card*-DSI-1/dpms at "Off").
+
+State is read from the DRM connector because `xset q` always says
+"Monitor is On".
+"""
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+EV_KEY = 1
+EV_REL = 2
+EV_ABS = 3
+EV_MSC = 4
+KEY_POWER = 116
+KEY_VOLUMEUP = 115
+KEY_VOLUMEDOWN = 114
+EVENT_FMT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FMT)
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def session_env():
+    """Environment of the running graphical session (LXQt on labwc/Wayland)."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        if comm not in ("lxqt-session", "labwc", "xfce4-session", "gnome-shell"):
+            continue
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        env = dict(kv.split(b"=", 1) for kv in raw.split(b"\0") if b"=" in kv)
+        out = {
+            "XDG_RUNTIME_DIR": "/run/user/10000",
+            "PULSE_SERVER": "unix:/run/user/10000/pulse/native",
+            "DBUS_SESSION_BUS_ADDRESS": env.get(b"DBUS_SESSION_BUS_ADDRESS", b"").decode(),
+            "HOME": "/home/zhoulei",
+            "USER": "zhoulei",
+        }
+        if b"WAYLAND_DISPLAY" in env:
+            out["WAYLAND_DISPLAY"] = env[b"WAYLAND_DISPLAY"].decode()
+            out["QT_QPA_PLATFORM"] = "wayland"
+        else:
+            out["DISPLAY"] = env.get(b"DISPLAY", b":0").decode()
+            out["XAUTHORITY"] = env.get(b"XAUTHORITY", b"").decode()
+        return out
+    return {"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/run/user/10000"}
+
+
+def as_user(argv, env):
+    e = dict(os.environ)
+    e.update(env)
+    return subprocess.run(
+        ["/usr/bin/setpriv", "--reuid=10000", "--regid=10000", "--clear-groups",
+         "--", *argv],
+        env=e, capture_output=True, text=True, timeout=20)
+
+
+def dpms_state():
+    for p in glob.glob("/sys/class/drm/card*-DSI-*/dpms"):
+        try:
+            with open(p) as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return "unknown"
+
+
+SLEEP_STATE = "/run/tablet-sleep.saved"
+BL = "/sys/class/backlight/lcd-backlight/brightness"
+
+
+
+LONG_PRESS_S = 3.0
+LEAVE_CMD = "/usr/bin/lxqt-leave"
+
+
+def run_as_user(argv, env):
+    """Run a GUI helper as the session user with the full environment."""
+    e = dict(os.environ)
+    e.update(env)
+    e.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    try:
+        subprocess.Popen(["/usr/bin/setpriv", "--reuid=10000", "--regid=10000",
+                          "--clear-groups", "--", *argv],
+                         env=e, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError as exc:
+        log(f"spawn failed: {exc}")
+        return False
+
+
+def show_power_menu(env):
+    if run_as_user([LEAVE_CMD], env):
+        log("power key: long press -> leave menu")
+
+
+def current_volume(env):
+    """Read the sink volume as an integer percentage (PulseAudio)."""
+    try:
+        r = subprocess.run(["/usr/bin/setpriv", "--reuid=10000", "--regid=10000",
+                            "--clear-groups", "--",
+                            "/usr/bin/pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+                           env={**os.environ, **env}, capture_output=True,
+                           text=True, timeout=5)
+        m = None
+        for tok in r.stdout.replace("/", " ").split():
+            if tok.endswith("%"):
+                m = tok[:-1]
+                break
+        return int(m) if m and m.isdigit() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def volume_osd(env, pct):
+    """A notification popup with a progress hint (shown by lxqt-notificationd)."""
+    if pct is None:
+        return
+    icon = ("audio-volume-muted" if pct == 0 else
+            "audio-volume-low" if pct < 34 else
+            "audio-volume-medium" if pct < 67 else "audio-volume-high")
+    run_as_user(["/usr/bin/notify-send", "-a", "volume", "-i", icon,
+                 "-h", f"int:value:{pct}", "-t", "1200",
+                 "音量", f"{pct}%"], env)
+
+
+def volume(delta, env):
+    """One spawn per press: pactl set/get + a single replacing OSD."""
+    script = (
+        "pactl set-sink-volume @DEFAULT_SINK@ {d:+d}%; "
+        "v=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o '[0-9]\\+%' | head -1 | tr -d '%'); "
+        "[ -n \"$v\" ] || exit 0; "
+        "i=audio-volume-muted; [ \"$v\" -ge 1 ] && i=audio-volume-low; "
+        "[ \"$v\" -ge 34 ] && i=audio-volume-medium; "
+        "[ \"$v\" -ge 67 ] && i=audio-volume-high; "
+        "notify-send -a volume -r 1001 -i \"$i\" -h \"int:value:$v\" -t 800 音量 \"$v%\""
+    ).format(d=delta)
+    if run_as_user(["/bin/sh", "-c", script], env):
+        log(f"volume {delta:+d}%")
+
+
+def asleep():
+    """True when the panel is blanked.
+
+    The DRM dpms property always says "On" under labwc/Wayland, so the
+    backlight (and the state file written by tablet-sleep) is authoritative.
+    """
+    try:
+        if int(open(BL).read().strip()) == 0:
+            return True
+    except OSError:
+        pass
+    return os.path.exists(SLEEP_STATE)
+
+
+LOCK_CMD = "/usr/local/bin/tablet-pinlock"
+
+
+def locked():
+    try:
+        return subprocess.run(["/usr/bin/pgrep", "-f", "/usr/local/lib/tablet-pinlock.py"],
+                              capture_output=True, timeout=5).returncode == 0
+    except OSError:
+        return False
+
+
+def blank(env):
+    if not locked():
+        run_as_user([LOCK_CMD], env)
+    subprocess.run(["/usr/local/bin/tablet-sleep"], capture_output=True,
+                   timeout=15)
+
+
+def unblank(env):
+    subprocess.run(["/usr/local/bin/tablet-sleep", "wake"], capture_output=True,
+                   timeout=15)
+
+
+def dev_name(path):
+    try:
+        with open(f"/sys/class/input/{os.path.basename(path)}/device/name") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def main():
+    fds = {}
+    for p in sorted(glob.glob("/dev/input/event*")):
+        name = dev_name(p)
+        try:
+            fds[os.open(p, os.O_RDONLY)] = (p, name)
+        except OSError:
+            continue
+    if not fds:
+        log("no input devices")
+        return 1
+    log("watching " + ", ".join(f"{n or os.path.basename(p)}" for p, n in fds.values()))
+
+    last_wake = 0.0
+    press_at = {}
+    last_vol = {}
+    while True:
+        ready, _, _ = select.select(list(fds), [], [], 2.0)
+        for fd in ready:
+            path, name = fds[fd]
+            try:
+                data = os.read(fd, EVENT_SIZE)
+            except OSError:
+                # device went away (e.g. BT keyboard disconnect): drop the fd,
+                # otherwise select() keeps reporting it readable and we spin
+                fds.pop(fd, None)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                if not fds:
+                    log("all input devices gone; exiting for rescan")
+                    return 1
+                continue
+            if len(data) < EVENT_SIZE:
+                fds.pop(fd, None)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                if not fds:
+                    log("all input devices gone; exiting for rescan")
+                    return 1
+                continue
+            _s, _u, typ, code, val = struct.unpack(EVENT_FMT, data)
+            if typ not in (EV_KEY, EV_REL, EV_ABS):
+                continue                     # ignore sync/msc noise
+
+            env = session_env()
+            try:
+                if "pwrkey" in name.lower():
+                    if typ == EV_KEY and code == KEY_POWER:
+                        if val == 1:
+                            press_at[path] = time.time()
+                        elif val == 0:
+                            t0 = press_at.pop(path, None)
+                            held = (time.time() - t0) if t0 else 0.0
+                            if held >= LONG_PRESS_S:
+                                show_power_menu(env)
+                            elif asleep():
+                                log("power key: display on")
+                                unblank(env)
+                            else:
+                                log("power key: display off")
+                                blank(env)
+                            time.sleep(0.3)
+                else:
+                    if typ == EV_KEY and val == 1 and code in (KEY_VOLUMEUP,
+                                                               KEY_VOLUMEDOWN):
+                        now = time.time()
+                        if now - last_vol.get(code, 0.0) < 0.20:
+                            continue
+                        last_vol[code] = now
+                        volume(5 if code == KEY_VOLUMEUP else -5, env)
+                        continue
+                    if asleep() and time.time() - last_wake > 0.5:
+                        last_wake = time.time()
+                        log(f"input on {name or path}: display on")
+                        unblank(env)
+            except Exception as exc:          # noqa: BLE001
+                log(f"action failed: {exc}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

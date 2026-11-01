@@ -1,0 +1,163 @@
+#!/usr/bin/python3
+"""tablet-rotate - manual / automatic screen rotation (Wayland + X11 fallback).
+
+    tablet-rotate normal|left|inverted|right   set a fixed orientation
+    tablet-rotate auto                         enable auto-rotation
+    tablet-rotate lock                         lock the current orientation
+    tablet-rotate cycle                        next orientation
+    tablet-rotate status                       print the current mode
+
+Under Wayland (labwc) it uses wlr-randr; on X11 it falls back to xrandr.
+Choosing a manual orientation sets the auto-rotate flag to "off", so the
+tablet-orientd daemon does not override it.  "auto" sets it back to "on".
+"""
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import time
+
+OUTPUT = 'DSI-1'
+FLAG = '/home/zhoulei/.config/tablet/auto-rotate'
+LOCK = '/tmp/tablet-rotate.lock'
+COOLDOWN = 2.0
+
+WLR = {'normal': 'normal', 'inverted': '180', 'left': '90', 'right': '270'}
+FROM_WLR = {'normal': 'normal', '180': 'inverted', '90': 'left', '270': 'right'}
+LABELS = {'normal': '竖屏', 'left': '横屏 · 左旋',
+          'inverted': '竖屏 · 倒置', 'right': '横屏 · 右旋'}
+ORDER = ['normal', 'left', 'inverted', 'right']
+
+
+def wayland():
+    return bool(os.environ.get('WAYLAND_DISPLAY')) or os.path.exists(
+        '/run/user/%d/wayland-0' % os.getuid())
+
+
+def wenviron():
+    e = dict(os.environ)
+    e.setdefault('WAYLAND_DISPLAY', 'wayland-0')
+    e.setdefault('XDG_RUNTIME_DIR', '/run/user/%d' % os.getuid())
+    return e
+
+
+def wlr(args):
+    return subprocess.run(['wlr-randr', '--output', OUTPUT] + args,
+                          capture_output=True, text=True, env=wenviron())
+
+
+def set_flag(on):
+    os.makedirs(os.path.dirname(FLAG), exist_ok=True)
+    with open(FLAG, 'w') as f:
+        f.write('on' if on else 'off')
+
+
+def flag_on():
+    try:
+        return open(FLAG).read().strip() != 'off'
+    except Exception:
+        return True
+
+
+def guard():
+    try:
+        fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stamp = os.fstat(fd).st_mtime
+        if time.time() - stamp < COOLDOWN:
+            os.close(fd)
+            return None
+        os.utime(fd, None)
+        return fd
+    except (BlockingIOError, OSError):
+        return None
+
+
+def apply(mode):
+    if wayland():
+        t = WLR[mode]
+        r = wlr(['--transform', t])
+        if r.returncode != 0:
+            return False, (r.stderr or r.stdout).strip()[:120]
+        set_flag(False)
+        try:
+            subprocess.run(["sudo", "-n", "/usr/local/bin/tablet-touch-matrix",
+                            str(t)], timeout=5, capture_output=True)
+        except Exception:
+            pass
+        return True, ''
+    rot, refl = ({'normal': ('normal', 'normal'),
+                  'inverted': ('inverted', 'normal'),
+                  'left': ('left', 'xy'),
+                  'right': ('left', 'normal')})[mode]
+    r = subprocess.run(['xrandr', '--output', OUTPUT, '--rotate', rot,
+                        '--reflect', refl], capture_output=True, text=True,
+                       env=dict(os.environ, DISPLAY=os.environ.get('DISPLAY', ':0')))
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:120]
+    set_flag(False)
+    return True, ''
+
+
+def current():
+    if wayland():
+        r = wlr([])
+        m = re.search(r'Transform: (\S+)', r.stdout or '')
+        if m:
+            return FROM_WLR.get(m.group(1), 'normal')
+    return 'normal'
+
+
+def notify(text):
+    try:
+        subprocess.run(['notify-send', '-a', '旋转', '-t', '1800',
+                        '屏幕方向', text], capture_output=True,
+                       env=dict(os.environ, DISPLAY=os.environ.get('DISPLAY', ':0')))
+    except Exception:
+        pass
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ('status', '-s'):
+        m = current()
+        print(f'{m}  ({LABELS.get(m, m)})  auto={"on" if flag_on() else "off"}')
+        return 0
+
+    arg = sys.argv[1]
+
+    if arg == 'auto':
+        set_flag(True)
+        print('自动旋转：开')
+        notify('自动旋转已开启')
+        return 0
+    if arg == 'lock':
+        set_flag(False)
+        print('自动旋转：关（已锁定）')
+        notify('已锁定当前方向')
+        return 0
+
+    fd = guard()
+    if fd is None:
+        return 0
+    try:
+        if arg == 'cycle':
+            cur = current()
+            nxt = ORDER[(ORDER.index(cur) + 1) % len(ORDER)] if cur in ORDER else 'normal'
+            arg = nxt
+        if arg not in WLR:
+            print('用法: tablet-rotate [normal|left|inverted|right|cycle|auto|lock|status]')
+            return 2
+        ok, err = apply(arg)
+        if ok:
+            print(f'{arg} {LABELS[arg]}（已锁定）')
+            notify(LABELS[arg] + '（已锁定）')
+            return 0
+        print('失败:', err)
+        return 1
+    finally:
+        os.close(fd)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,10 +1,9 @@
 # 刷机指南（Windows / Linux / macOS / recovery）
 
-镜像分卷在 [Releases](../../releases)：
+镜像在 [Releases](../../releases)（v13 起压缩后约 1.3 GB，单文件，不分卷）：
 
 ```
-debian-rootfs-v13.img.gz.part-aa
-debian-rootfs-v13.img.gz.part-ab
+debian-rootfs-v13.img.gz
 SHA256SUMS
 ```
 
@@ -19,12 +18,11 @@ SHA256SUMS
   adb pull /sdcard/userdata-backup.img
   ```
 
-## 1. 合并 + 解压
+## 1. 解压
 
 Linux / macOS：
 
 ```bash
-cat debian-rootfs-v13.img.gz.part-* > debian-rootfs-v13.img.gz
 gzip -d debian-rootfs-v13.img.gz
 sha256sum -c SHA256SUMS
 ```
@@ -32,9 +30,6 @@ sha256sum -c SHA256SUMS
 Windows（PowerShell）：
 
 ```powershell
-Get-Content .\debian-rootfs-v13.img.gz.part-aa, .\debian-rootfs-v13.img.gz.part-ab -AsByteStream -ReadCount 0 |
-  Set-Content .\debian-rootfs-v13.img.gz -AsByteStream
-# 解压（7-Zip 或 Git 自带 gzip）
 7z x .\debian-rootfs-v13.img.gz
 Get-FileHash .\debian-rootfs-v13.img -Algorithm SHA256   # 对照 SHA256SUMS
 ```

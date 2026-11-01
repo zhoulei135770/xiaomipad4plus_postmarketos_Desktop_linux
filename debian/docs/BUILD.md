@@ -56,6 +56,24 @@ sudo ./scripts/make-image.sh /srv/debport/debian-rootfs.img 8G
 脚本：`mkfs.ext4` → mount → `rsync -aHAX rootfs/` → `umount` →
 输出 ext4，UUID 固定 `8def993b-42f5-4ba1-9813-c046e498fe22`。
 
+### 权限与身份（出镜像前检查）
+
+```bash
+# 用户 home 全部归 uid/gid 10000
+sudo chown -R 10000:10000 rootfs/home/zhoulei
+# sudoers 必须 440，否则 sudo 拒绝加载
+sudo chmod 440 rootfs/etc/sudoers.d/tablet-settings
+# 可执行脚本
+sudo chmod 755 rootfs/usr/local/bin/tablet-* rootfs/usr/bin/wps rootfs/usr/bin/et \
+              rootfs/usr/bin/wpp rootfs/usr/bin/wpspdf
+# 传感器固件必须 644 且 25468 字节
+sudo chmod 644 rootfs/lib/firmware/qcom/sensors/sns.reg
+# UUID 校验
+sudo blkid /srv/debport/debian-rootfs.img     # 应输出 8def993b-42f5-4ba1-9813-c046e498fe22
+```
+
+> 宿主上没有 uid 10000 时，`ls -n` 显示数字 10000 即正确（不要 `chown root`）。
+
 ## 4. 刷入
 
 见 [`FLASH.md`](FLASH.md)。

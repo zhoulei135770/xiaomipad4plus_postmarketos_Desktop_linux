@@ -1,5 +1,5 @@
 #!/bin/sh
-# Merge the release parts, verify, and flash userdata with fastboot.
+# Decompress (if needed), verify, and flash userdata with fastboot.
 # Usage: ./flash.sh [image-version]   (default: v13)
 set -e
 VER="${1:-v13}"
@@ -7,10 +7,6 @@ IMG="debian-rootfs-${VER}.img"
 GZ="${IMG}.gz"
 
 if [ ! -f "$IMG" ]; then
-  if ls "${GZ}.part-"* >/dev/null 2>&1; then
-    echo "==> merging parts"
-    cat "${GZ}.part-"* > "$GZ"
-  fi
   echo "==> decompressing"
   gzip -d "$GZ"
 fi

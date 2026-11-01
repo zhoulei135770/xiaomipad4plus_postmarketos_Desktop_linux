@@ -84,3 +84,24 @@
 `tablet-powerkeyd` 用 `select()` 监听所有 `/dev/input/event*`；设备消失时要
 `close()+del`，否则 select 一直返回可读 → 95% CPU 空转。
 
+
+## WPS Office（星火安装后打不开）
+
+现象：点图标没反应，命令行 wps 立刻退出、无输出。
+
+原因：WPS 11.1 是按 Debian 10/UOS 编译的，依赖的 soname 在 forky 已经升级：
+
+| WPS 需要 | Debian forky 提供 |
+|---|---|
+| libxml2.so.2 | libxml2.so.16 |
+| libicuuc.so.72 / libicui18n.so.72 | ICU 76 |
+
+修法：把 bookworm 的 libxml2 + libicu72 解到
+/opt/kingsoft/wps-office/office6/libcompat，再用 wrapper 设 LD_LIBRARY_PATH：
+
+``bash
+sudo debian/scripts/wps-fix.sh
+``
+
+首次启动会弹《WPS Office 最终用户许可协议》，点“确定”即可。
+

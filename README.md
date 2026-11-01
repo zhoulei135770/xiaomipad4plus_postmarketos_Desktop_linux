@@ -7,7 +7,7 @@ Linux 平板**：labwc + LXQt 桌面、触摸/旋转、中文输入、浏览器�
 > **这不是一个"官方发行版"**，而是一份**完整的移植记录 + 可复现的补丁/脚本/镜像**。
 > 每个硬件都写清楚：**我们怎么解决的、还差什么、为什么差**。
 
-![桌面](screenshots/02-desktop.png)
+![桌面](screenshots/shot-now2.png)
 ![平板设置](screenshots/03-settings.png)
 ![锁屏](screenshots/01-lock.png)
 

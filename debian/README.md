@@ -114,3 +114,16 @@ sudo ./scripts/make-image.sh out.img 8G
 当前桌面（1920×1200，labwc + LXQt 2.4，Onyxian-Rounded 主题）：
 
 ![桌面](screenshots/desktop-2026-11-01.png)
+
+## 下载（v13）
+
+- Release: <https://github.com/zhoulei135770/xiaomipad4plus_postmarketos_Desktop_linux/releases/tag/v13>
+- 资产：`debian-rootfs-v13.img.gz`（1.33 GB）+ `SHA256SUMS`
+- SHA-256（解压后镜像）：`6ECCD964AAB33F3C95F9CDEA9A1EB5B03A1FC75F998C166C293EECF42A789C22`
+- 文件系统 UUID：`8def993b-42f5-4ba1-9813-c046e498fe22`
+
+```bash
+gzip -d debian-rootfs-v13.img.gz
+sha256sum -c SHA256SUMS
+fastboot flash userdata debian-rootfs-v13.img
+```

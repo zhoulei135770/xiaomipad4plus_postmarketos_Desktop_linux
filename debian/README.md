@@ -108,3 +108,9 @@ sudo ./scripts/make-image.sh out.img 8G
 
 文档与脚本：MIT。镜像内包含的第三方软件遵循各自许可证（Debian 主仓库、pmOS 内核、Papirus、Kvantum 主题等）。
 
+
+## 截图
+
+当前桌面（1920×1200，labwc + LXQt 2.4，Onyxian-Rounded 主题）：
+
+![桌面](screenshots/desktop-2026-11-01.png)

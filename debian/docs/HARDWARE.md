@@ -60,8 +60,7 @@
 - `qcom-battery` 只暴露 `capacity / voltage_now / current_now / temp`，
   **没有 `charge_now` / `energy_now`**
 - UPower 因此 `energy = 0 Wh`，LXQt 电源管理显示 0；百分比本身是准的（`capacity`）
-- 解决：自写 `tablet-battery-sni`，直读 sysfs 画百分比图标，并关掉
-  `lxqt-powermanagement` 的 `enableBatteryWatcher`
+- 解决：自写 `tablet-battery-sni`，直读 sysfs 画百分比图标（10 秒刷新，发 SNI\n  `NewIcon`/`NewToolTip` 信号），并关掉 `lxqt-powermanagement` 的 `enableBatteryWatcher`\n- 注意：SNI 必须在 panel 启动后保持运行；已加入 `labwc/autostart`
 - 充电上限：`pm660-charger` 默认 1.5 A；`tablet-charge-guard` 做温度保护
 
 ## GPU / 合成
@@ -84,3 +83,4 @@
 
 `tablet-powerkeyd` 用 `select()` 监听所有 `/dev/input/event*`；设备消失时要
 `close()+del`，否则 select 一直返回可读 → 95% CPU 空转。
+

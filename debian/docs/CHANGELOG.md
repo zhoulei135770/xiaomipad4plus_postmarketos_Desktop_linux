@@ -2,6 +2,12 @@
 
 ## v13 — 2026-11-02 (public release)
 
+**修复**
+
+- 电量托盘改为实时：`tablet-battery-sni` 每 10 秒读一次 `capacity` 并发送 SNI
+  `NewIcon` 信号（之前只在启动时画一次，会出现 88% 而实际 92% 的偏差）；
+  `Id` 带 pid 避免 panel 缓存旧条目；`labwc/autostart` 里启动它
+
 首个公开发布：镜像已清理浏览器配置 / WiFi 密码 / SSH 密钥 / 历史 / machine-id。
 
 ## v12 — 2026-11-01
@@ -55,4 +61,5 @@
 - `lxqt-notificationd` + 音量 OSD
 - Onyxian-Rounded 主题 + Kvantum `Orchis-solid` + Papirus
 - WiFi / 蓝牙 / 声音 / 传感器 / 后置相机
+
 

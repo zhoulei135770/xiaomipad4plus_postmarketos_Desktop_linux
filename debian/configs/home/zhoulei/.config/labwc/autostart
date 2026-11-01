@@ -42,3 +42,4 @@ swayidle -w timeout 300 "wlopm --off \*" resume "wlopm --on \*" > /dev/null 2>&1
 # (tablet-gpu-harden.service) is applied before graphical.target, so the
 # lock's first frames can no longer hit an unhardened GPU.
 (/bin/sh -c 'sleep 20; exec /usr/local/bin/tablet-pinlock') &
+/usr/local/bin/tablet-battery-sni &

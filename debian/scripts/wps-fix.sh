@@ -30,14 +30,13 @@ cp -a x-libicu72/usr/lib/aarch64-linux-gnu/libicu*.so.72* "$LIBDIR"/
 ldconfig 2>/dev/null || true
 
 for app in wps et wpp wpspdf; do
-  [ -x "/opt/kingsoft/wps-office/office6/$app" ] || continue
-  cat > "/usr/local/bin/$app" <<EOF
-#!/bin/sh
-export LD_LIBRARY_PATH=$LIBDIR:\${LD_LIBRARY_PATH}
-exec /opt/kingsoft/wps-office/office6/$app "\$@"
-EOF
-  chmod 755 "/usr/local/bin/$app"
+  [ -f "/usr/bin/$app" ] || continue
+  if ! grep -q 'libcompat' "/usr/bin/$app"; then
+    sed -i "2i export LD_LIBRARY_PATH=$LIBDIR:\${LD_LIBRARY_PATH}" "/usr/bin/$app"
+  fi
+  echo "patched /usr/bin/$app"
 done
 
 echo "done. 启动: wps / et / wpp"
 echo "首次启动会弹出《WPS Office 最终用户许可协议》，点“确定”即可。"
+

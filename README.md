@@ -160,6 +160,8 @@ screenshots/     界面截图
 3. **`msm` 是内置模块**，`modprobe.d` 对它无效，GPU 加固必须用 systemd 服务。
 4. **旋转与触摸矩阵必须同时改**，否则点击会差 90°/180°。
 5. **真正的 suspend 会死锁**，本项目用伪睡眠代替。
+6. **电量图标突然消失不要慌**——不是电量计坏了，是 `tablet-battery-sni` 和面板抢跑，
+   见 [`docs/BATTERY-SNI-RACE.md`](docs/BATTERY-SNI-RACE.md)。
 
 ---
 

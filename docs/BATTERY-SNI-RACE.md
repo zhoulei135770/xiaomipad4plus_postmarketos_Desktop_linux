@@ -115,7 +115,7 @@ v as 5 "...nm_applet" "...:1.49" "...blueman" "...:1.53" "org.tablet.BatterySni/
 
 ---
 
-## 附：同一次排查发现的另一个 bug（未修）
+## 附：同一次排查发现的 `tablet-touch-rotate`（已禁用）
 
 `tablet-touch-rotate` 每秒报错一次：
 
@@ -128,9 +128,30 @@ v as 5 "...nm_applet" "...:1.49" "...blueman" "...:1.53" "org.tablet.BatterySni/
 1. 这是 **X11** 工具，而桌面是 **Wayland（labwc）**；
 2. Debian 上根本没装 `xinput`。
 
-结果就是每秒 spawn 一个必然失败的进程，日志刷屏，**触摸标定实际没生效**。
+结果就是每秒 spawn 一个必然失败的进程，日志刷屏，而且**标定实际没有生效**。
 
-pmOS 那边是用 libinput 的 udev 矩阵做的（`99-goodix-landscape.rules` +
-`LIBINPUT_CALIBRATION_MATRIX`），Debian 这份直接搬了 X11 版本过来。
+### 为什么可以直接禁掉
 
-待办：要么在 Debian 上禁用它，要么改写成 libinput/Wayland 方式。
+Debian 这套里，旋转和矩阵有另外两个东西在管：
+
+| 职责 | 实际由谁负责 |
+|---|---|
+| 输出旋转 | `tablet-orientd` → `wlr-randr --output DSI-1 --transform N` |
+| 触摸标定 | udev 规则 `99-goodix-landscape.rules` → `LIBINPUT_CALIBRATION_MATRIX` |
+
+`tablet-orientd` 的 `set_transform()` 会同时改输出变换和触摸矩阵，两边不会脱节。
+实测触摸四方向都准确，说明 `tablet-touch-rotate` 全程没参与。
+
+### 处理
+
+```sh
+sudo systemctl disable --now tablet-touch-rotate
+```
+
+之后 `journalctl` 里的 `xinput` 报错归零，`tablet-orientd` 保持 active，
+`99-goodix-landscape.rules` 内容不变。
+
+> 注意：`etc/systemd/tablet-touch-rotate.service` 仍在仓库里，`install.sh` 会重新
+> `enable` 它。如果在 Debian 上不再需要，重装后要再禁一次，或者干脆从
+> `install.sh` 的安装列表里去掉。
+
